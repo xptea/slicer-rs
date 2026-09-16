@@ -1,0 +1,16 @@
+# Slicer FFmpeg source lock.
+#
+# This is intentionally a plain KEY=VALUE file so the build scripts can read
+# it without a JSON/YAML dependency. Keep the hash tied to the exact archive
+# URL; changing either requires a new review of the license and codec profile.
+FFMPEG_VERSION=7.1.5
+FFMPEG_RELEASE_TAG=n7.1.5
+FFMPEG_SOURCE_ARCHIVE=ffmpeg-7.1.5.tar.xz
+FFMPEG_SOURCE_URL=https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz
+FFMPEG_SOURCE_SHA256=de668509caf9e35e3cd162473441fdb29538c6d96ed080292b3cf9e6fc5d558f
+FFMPEG_SOURCE_SIZE=11050340
+FFMPEG_SIGNATURE_URL=https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz.asc
+FFMPEG_SIGNATURE_SHA256=7ce4b9d56e3ef0cd4c3a9c0b2c8a034ac91e6c4c011c1f10b05a8aa7292fca35
+FFMPEG_RELEASE_KEY_URL=https://ffmpeg.org/ffmpeg-devel.asc
+FFMPEG_RELEASE_KEY_FINGERPRINT=FCF986EA15E6E293A5644F10B4322F04D67658D8
+FFMPEG_LICENSE=LGPL-2.1-or-later

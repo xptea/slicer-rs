@@ -1,0 +1,54 @@
+Slicer bundles FFmpeg 7.1.5, built from the upstream source release.
+
+Source archive
+--------------
+Project:       FFmpeg
+Version:       7.1.5
+Release tag:   n7.1.5
+Archive:       ffmpeg-7.1.5.tar.xz
+URL:           https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz
+SHA-256:       de668509caf9e35e3cd162473441fdb29538c6d96ed080292b3cf9e6fc5d558f
+Size:          11050340 bytes
+Signature:     https://ffmpeg.org/releases/ffmpeg-7.1.5.tar.xz.asc
+Key:           FCF986EA15E6E293A5644F10B4322F04D67658D8
+
+License
+-------
+The FFmpeg code used by this build is licensed under the GNU Lesser General
+Public License, version 2.1 or later (LGPL-2.1-or-later), together with the
+notices for individual files in the source archive. The corresponding source
+archive is shipped under the package's ffmpeg-source/ directory in every
+Slicer package (share/slicer/ on Linux and the app's Resources/slicer/ on
+macOS).
+The complete license text is also extracted as COPYING.LGPLv2.1 next to the
+source archive in the package.
+
+Build profile
+-------------
+This is an LGPL-only build. It does not pass --enable-gpl,
+--enable-version3, or --enable-nonfree, and it does not link x264, libvpx,
+libmp3lame, or any other external codec library. FFmpeg's own libraries are
+linked statically into the two tools. On the default Linux build, the tools
+use the platform's dynamic libc, libm, and zlib runtime (the exact runtime
+dependencies are recorded by the build output); those operating-system
+libraries are not part of this package. The optional --static-linux build
+also links libc when a suitable target toolchain provides it, but that mode
+requires the target platform's corresponding relink/source materials before
+redistribution. The following native functionality is intentionally enabled:
+
+* demux/mux for common local MP4/MOV, Matroska/WebM, MPEG-TS, AVI, MP3, WAV,
+  FLAC, Ogg, and image-pipe files;
+* native MPEG-4 Part 2 and AAC encoders;
+* native H.264, HEVC, MPEG-1/2/4, MJPEG, VP8, and VP9 decoders;
+* native MP3 and PCM decoders plus PCM encoders;
+* the filters needed by Slicer for exact trims and still-frame previews,
+  including trim, atrim, setpts, asetpts, scale, format, aresample, and the
+  testsrc2 fixture; and
+* native GIF export through the GIF muxer/encoder and the palettegen,
+  paletteuse, split, and fps filters. These filters are part of FFmpeg's
+  LGPL source profile and do not add an external codec dependency.
+
+FFmpeg has no native VP8/VP9 or MP3 encoder. VP8/VP9 encoding would require
+libvpx, and MP3 encoding would require libmp3lame; those are separate optional
+dependencies and are deliberately not hidden in the LGPL bundle. H.264
+encoding through x264 is also omitted because FFmpeg documents x264 as GPL.

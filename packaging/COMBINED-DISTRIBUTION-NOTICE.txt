@@ -1,0 +1,24 @@
+Slicer Linux distribution license summary
+==========================================
+
+The Slicer application source and the original Slicer files are licensed
+under the MIT License in the top-level LICENSE file. That MIT notice remains
+with the application source and does not relicense third-party components.
+
+This Linux distribution also contains a separate native playback runtime
+under lib/slicer/playback/. The default runtime is Ubuntu's libmpv2 package
+and its shared-library dependency closure. Ubuntu's libmpv2 copyright file
+states that its distributed binaries are GPL-3-or-later; the default Ubuntu
+FFmpeg shared libraries in that closure are GPL-2-or-later. Other libraries
+may carry LGPL, BSD, MIT, Apache, ISC, or other per-file terms.
+
+The playback runtime is therefore a combined distribution containing both
+MIT-licensed Slicer code and separately licensed third-party binaries. The
+complete per-package copyright texts are in playback-notices/, and exact
+source package versions, archive checksums, and source materials are recorded
+in playback-source/ and SOURCE-MANIFEST.txt. Follow the terms of each
+component when redistributing or modifying the package.
+
+The standalone FFmpeg command line tools in lib/slicer/bin/ are the separate
+source-pinned LGPL profile described in packaging.md. Their LGPL notice does
+not change the license of the playback runtime.

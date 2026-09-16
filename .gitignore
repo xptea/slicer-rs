@@ -1,0 +1,28 @@
+/target/
+/dist/
+/dist-minimal/
+/build/
+
+# Codex/workspace metadata is local session state, not project content.
+/.agents/
+/.codex/
+
+# Editor, OS, and local tool output.
+.DS_Store
+*.swp
+*.swo
+*.log
+*.profraw
+coverage/
+
+# The two GPUI patches below are source dependencies and must stay visible to
+# version control. Ignore any other vendored/generated material.
+/vendor/*
+!/vendor/gpui-pre-linux/
+!/vendor/gpui-pre-linux/**
+!/vendor/gpui-pre-wgpu/
+!/vendor/gpui-pre-wgpu/**
+# libmpv source snapshots are only build inputs for the source-complete
+# portable bundle and can be hundreds of megabytes.
+/packaging/playback-source/
+*.partial.*

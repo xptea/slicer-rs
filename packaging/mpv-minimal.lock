@@ -1,0 +1,29 @@
+# Source lock and feature profile for the reduced Linux libmpv runtime.
+# Generated from the reference build on Ubuntu x86-64. Build products stay in
+# build/ and are intentionally excluded from source control.
+
+[mpv]
+version = 0.41.0
+source_url = https://github.com/mpv-player/mpv/archive/refs/tags/v0.41.0.tar.gz
+source_sha256 = ee21092a5ee427353392360929dc64645c54479aefdb5babc5cfbb5fad626209
+license = GPL-2.0-or-later
+
+[ffmpeg]
+version = 7.1.5
+source_archive = ffmpeg-7.1.5.tar.xz
+source_sha256 = de668509caf9e35e3cd162473441fdb29538c6d96ed080292b3cf9e6fc5d558f
+linkage = static
+
+[meson]
+default_library = shared
+buildtype = release
+gpl = true
+cplayer = false
+libmpv = true
+tests = false
+fuzzers = false
+
+# Enabled playback interfaces:
+# libass, libplacebo, OpenGL/EGL (X11), Vulkan, VA-API (X11), PulseAudio, X11
+# Optional player, streaming, disc, scripting, alternate audio, Wayland, and
+# VDPAU integrations remain disabled.

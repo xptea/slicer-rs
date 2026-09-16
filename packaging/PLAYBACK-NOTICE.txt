@@ -1,0 +1,34 @@
+Slicer Linux playback runtime
+================================
+
+The Linux playback directory contains libmpv and the shared libraries needed
+by Slicer's native playback engine.  This runtime is separate from the
+bundled FFmpeg command line tools used for export and preview.
+
+The default input for scripts/bundle-playback-linux.sh is the Ubuntu
+libmpv2 package.  The Ubuntu package's copyright file states that its
+distributed binaries are GPL-3-or-later because of their linked libraries.
+The FFmpeg shared libraries supplied by that package are also covered by the
+license profile recorded in their package copyright file (the default Ubuntu
+build is GPL-2-or-later).  The runtime therefore must not be described as an
+LGPL-only component.  Read the complete per-package copyright files under
+notices/ and the source manifest before redistributing a package.
+
+The package contains the exact runtime package versions and hashes in
+SOURCE-MANIFEST.txt.  For each redistributable GPL package, the matching
+upstream source archives are copied under source/ and their checksums are
+listed in that manifest.  PROVENANCE.txt records the input libmpv path,
+dependency closure, and loader patching.
+
+Slicer does not copy glibc, the ELF loader, kernel interfaces, or vendor GPU
+drivers.  The graphics and video acceleration interfaces remain host-facing;
+Mesa, NVIDIA, AMD, Intel, VA-API, VDPAU, and Vulkan driver files are selected
+by the target system.  All other ELF dependencies in the closure are placed
+beside libmpv and use DT_RUNPATH=$ORIGIN so an engine dlopen of the packaged
+libmpv.so.2 resolves this private set without a process-wide
+LD_LIBRARY_PATH.  Do not prepend the playback directory to LD_LIBRARY_PATH in
+the launcher: that would make unrelated child processes see the playback
+FFmpeg ABI.  The export FFmpeg programs remain isolated in lib/slicer/bin.
+
+See share/slicer/packaging.md in an installed package for the build and source
+material workflow.

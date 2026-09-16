@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Slicer
+Comment=Trim and export video clips
+Exec=slicer %F
+Icon=slicer
+Terminal=false
+Categories=AudioVideo;Video;AudioVideoEditing;
+StartupWMClass=com.slicer.Slicer
+MimeType=video/mp4;video/x-matroska;video/webm;video/quicktime;video/x-msvideo;
