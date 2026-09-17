@@ -6,6 +6,9 @@
 //! worker queues.
 
 mod actions;
+#[allow(dead_code)]
+mod canvas_tools;
+mod composition_preview;
 mod crop;
 mod editor;
 mod export_controls;
@@ -14,6 +17,10 @@ mod file_clipboard;
 mod file_drop;
 mod formatting;
 mod home_view;
+#[allow(dead_code)]
+mod layer_inspector;
+#[allow(dead_code)]
+mod layered_timeline;
 mod native_preview;
 mod native_surface;
 mod navigation;
@@ -28,7 +35,6 @@ mod workers;
 use formatting::*;
 use theme::*;
 
-use crate::{home, job, media, preview, waveform};
 use gpui_kit::component::Size as KitSize;
 use gpui_kit::component::slider::{SliderEvent, SliderState, SliderValue};
 use gpui_kit::component::{
@@ -39,6 +45,7 @@ use gpui_kit::component::{
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::{component::*, gpui::*, platform};
 use slicer::native_player;
+use slicer::{export, home, job, media, preview, project, session, waveform};
 use std::{
     path::{Path, PathBuf},
     process::Command,
@@ -63,6 +70,20 @@ enum ExportState {
     Failed,
 }
 
+enum UiExportJob {
+    Legacy(job::JobHandle),
+    Composition(export::CompositionExportJob),
+}
+
+impl UiExportJob {
+    fn cancel(&self) {
+        match self {
+            Self::Legacy(job) => job.cancel(),
+            Self::Composition(job) => job.cancel(),
+        }
+    }
+}
+
 #[derive(Clone)]
 struct ThumbnailSlot {
     path: PathBuf,
@@ -82,8 +103,14 @@ struct InspectResult {
     info: Result<media::MediaInfo, String>,
 }
 
+struct ImportResult {
+    path: PathBuf,
+    asset: Result<project::Asset, String>,
+}
+
 enum DialogKind {
     Open,
+    AddMedia,
     Folder,
     Output,
     DefaultOutput,
@@ -114,6 +141,11 @@ pub struct SlicerApp {
     library_refresh_at: Instant,
     thumbnail_worker: Option<preview::PreviewWorker>,
     thumbnail_pending: Option<(PathBuf, SystemTime)>,
+    composition_preview_worker: Option<composition_preview::CompositionPreviewWorker>,
+    composition_preview_image: Option<Arc<Image>>,
+    composition_preview_loading: bool,
+    composition_preview_error: Option<String>,
+    composition_preview_generation: u64,
     waveform_worker: Option<waveform::WaveformWorker>,
     waveform: Option<Arc<waveform::Waveform>>,
     waveform_path: Option<PathBuf>,
@@ -121,10 +153,13 @@ pub struct SlicerApp {
     waveform_error: Option<String>,
 
     editor_path: Option<PathBuf>,
+    project_session: Option<session::ProjectSession>,
     media: Option<media::MediaInfo>,
     media_error: Option<String>,
     inspecting: bool,
     inspect_rx: Option<mpsc::Receiver<InspectResult>>,
+    import_rx: Option<mpsc::Receiver<ImportResult>>,
+    import_pending: usize,
     preview_seconds: f64,
     preview_error: Option<String>,
     native: native_preview::NativePreview,
@@ -147,13 +182,14 @@ pub struct SlicerApp {
     quality_slider: Entity<SliderState>,
     default_quality_slider: Entity<SliderState>,
 
-    export_job: Option<job::JobHandle>,
+    export_job: Option<UiExportJob>,
     export_state: ExportState,
     export_progress: f64,
     exported_path: Option<PathBuf>,
     status: String,
 
     open_dialog_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
+    add_media_dialog_rx: Option<mpsc::Receiver<Option<Vec<PathBuf>>>>,
     folder_dialog_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
     output_dialog_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
     default_output_dialog_rx: Option<mpsc::Receiver<Option<PathBuf>>>,
@@ -224,6 +260,9 @@ impl SlicerApp {
 
         let settings_rx = spawn_settings_load();
         let thumbnail_worker = binaries.clone().map(preview::PreviewWorker::new);
+        let composition_preview_worker = binaries
+            .clone()
+            .map(composition_preview::CompositionPreviewWorker::new);
         let mut app = Self {
             binaries: binaries.clone(),
             binaries_error,
@@ -245,16 +284,24 @@ impl SlicerApp {
             library_refresh_at: Instant::now(),
             thumbnail_worker,
             thumbnail_pending: None,
+            composition_preview_worker,
+            composition_preview_image: None,
+            composition_preview_loading: false,
+            composition_preview_error: None,
+            composition_preview_generation: 0,
             waveform_worker: binaries.clone().map(waveform::WaveformWorker::new),
             waveform: None,
             waveform_path: None,
             waveform_generation: 0,
             waveform_error: None,
             editor_path: None,
+            project_session: None,
             media: None,
             media_error: None,
             inspecting: false,
             inspect_rx: None,
+            import_rx: None,
+            import_pending: 0,
             preview_seconds: 0.0,
             preview_error: None,
             native: native_preview::NativePreview::default(),
@@ -281,6 +328,7 @@ impl SlicerApp {
             exported_path: None,
             status: "Choose a library folder or drop a video to get started".to_owned(),
             open_dialog_rx: None,
+            add_media_dialog_rx: None,
             folder_dialog_rx: None,
             output_dialog_rx: None,
             default_output_dialog_rx: None,
@@ -328,6 +376,7 @@ impl Render for SlicerApp {
             || self.export_modal
             || self.crop.is_ready()
             || self.external_drop.is_some()
+            || self.uses_composition_preview()
         {
             self.native.hide();
         }

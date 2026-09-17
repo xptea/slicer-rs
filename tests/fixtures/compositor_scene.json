@@ -1,0 +1,102 @@
+{
+  "schema": "slicer.synthetic-scene.v1",
+  "scene_id": "p0-alpha-ordering-v1",
+  "seed": 12648430,
+  "canvas": { "width": 320, "height": 180 },
+  "frame_count": 24,
+  "fps": { "numerator": 30, "denominator": 1 },
+  "background_rgba": [16, 24, 40, 255],
+  "unicode_text": "Layer α • café • 日本語",
+  "layers": [
+    {
+      "id": "backdrop",
+      "z": 0,
+      "shape": "rect",
+      "x": 16,
+      "y": 16,
+      "width": 288,
+      "height": 148,
+      "rgba": [28, 80, 144, 180],
+      "opacity": 255,
+      "dx_per_frame": 0,
+      "dy_per_frame": 0
+    },
+    {
+      "id": "moving-red",
+      "z": 1,
+      "shape": "rect",
+      "x": 24,
+      "y": 56,
+      "width": 80,
+      "height": 48,
+      "rgba": [230, 70, 60, 220],
+      "opacity": 255,
+      "dx_per_frame": 5,
+      "dy_per_frame": 0
+    },
+    {
+      "id": "alpha-green-circle",
+      "z": 2,
+      "shape": "circle",
+      "x": 188,
+      "y": 48,
+      "width": 72,
+      "height": 72,
+      "rgba": [70, 220, 120, 160],
+      "opacity": 255,
+      "dx_per_frame": 0,
+      "dy_per_frame": 0
+    },
+    {
+      "id": "front-blue",
+      "z": 3,
+      "shape": "rect",
+      "x": 120,
+      "y": 118,
+      "width": 64,
+      "height": 28,
+      "rgba": [55, 125, 230, 140],
+      "opacity": 255,
+      "dx_per_frame": -1,
+      "dy_per_frame": 0
+    }
+  ],
+  "pixel_checks": [
+    {
+      "name": "opaque-background",
+      "frame": 0,
+      "x": 0,
+      "y": 0,
+      "expected_rgba": [16, 24, 40, 255]
+    },
+    {
+      "name": "backdrop-alpha",
+      "frame": 0,
+      "x": 20,
+      "y": 20,
+      "expected_rgba": [24, 64, 113, 255]
+    },
+    {
+      "name": "moving-layer-over-backdrop",
+      "frame": 0,
+      "x": 40,
+      "y": 70,
+      "expected_rgba": [202, 69, 67, 255]
+    },
+    {
+      "name": "circle-alpha-over-backdrop",
+      "frame": 0,
+      "x": 224,
+      "y": 84,
+      "expected_rgba": [53, 162, 117, 255]
+    },
+    {
+      "name": "front-layer-over-backdrop",
+      "frame": 0,
+      "x": 140,
+      "y": 130,
+      "expected_rgba": [41, 97, 177, 255]
+    }
+  ],
+  "expected_frame_hashes": []
+}

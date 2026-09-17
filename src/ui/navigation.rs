@@ -4,6 +4,12 @@ use super::*;
 
 impl SlicerApp {
     pub(super) fn header(&self, cx: &mut Context<Self>) -> AnyElement {
+        let media_import_busy = self.import_pending > 0;
+        let export_ready = self.media.is_some()
+            || self
+                .project_session
+                .as_ref()
+                .is_some_and(|session| session.project().output_range().is_some());
         let home = Button::new("nav-home")
             .ghost()
             .compact()
@@ -59,6 +65,55 @@ impl SlicerApp {
             })
             .when(self.screen == Screen::Editor, |header| {
                 header.child(
+                    Button::new("add-media")
+                        .secondary()
+                        .compact()
+                        .label(if media_import_busy {
+                            "Importing…"
+                        } else {
+                            "Add media"
+                        })
+                        .disabled(
+                            self.project_session.is_none()
+                                || self.export_job.is_some()
+                                || media_import_busy,
+                        )
+                        .on_click(cx.listener(|this, _, _, _| {
+                            if this.project_session.is_some()
+                                && this.export_job.is_none()
+                                && this.import_pending == 0
+                            {
+                                this.launch_dialog(DialogKind::AddMedia);
+                            }
+                        })),
+                )
+            })
+            .when(self.screen == Screen::Editor, |header| {
+                header.child(
+                    Button::new("save-project")
+                        .secondary()
+                        .compact()
+                        .label(
+                            if self
+                                .project_session
+                                .as_ref()
+                                .is_some_and(|session| session.is_dirty())
+                            {
+                                "Save*"
+                            } else {
+                                "Save"
+                            },
+                        )
+                        .disabled(
+                            self.project_session.is_none()
+                                || self.export_job.is_some()
+                                || media_import_busy,
+                        )
+                        .on_click(cx.listener(|this, _, _, _| this.save_project())),
+                )
+            })
+            .when(self.screen == Screen::Editor, |header| {
+                header.child(
                     h_flex()
                         .gap_0()
                         .bg(ink(TEXT))
@@ -74,9 +129,7 @@ impl SlicerApp {
                                 } else {
                                     "Export".into()
                                 })
-                                .disabled(
-                                    self.media.is_none() || self.settings_loading || self.crop.open,
-                                )
+                                .disabled(!export_ready || self.settings_loading || self.crop.open)
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     if this.export_job.is_some() {
                                         this.open_export_dialog(window, cx);
@@ -93,9 +146,7 @@ impl SlicerApp {
                                 .rounded_r(px(10.))
                                 .icon(gpui_kit::assets::IconName::ChevronDown)
                                 .accessibility_label("Customize export")
-                                .disabled(
-                                    self.media.is_none() || self.settings_loading || self.crop.open,
-                                )
+                                .disabled(!export_ready || self.settings_loading || self.crop.open)
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.open_export_dialog(window, cx)
                                 })),

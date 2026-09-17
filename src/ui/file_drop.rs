@@ -21,7 +21,10 @@ impl SlicerApp {
                         if let Some(paths) = this.external_drop.take() {
                             cx.stop_active_drag(window);
                             cx.stop_propagation();
-                            if let Some(path) = paths.paths().first().cloned() {
+                            let dropped = paths.paths().to_vec();
+                            if this.project_session.is_some() && dropped.len() > 1 {
+                                this.add_media_files(dropped);
+                            } else if let Some(path) = dropped.into_iter().next() {
                                 this.open_file(path, window, cx);
                             }
                             cx.notify();

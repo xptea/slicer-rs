@@ -1,7 +1,8 @@
 # Slicer
 
-Native Linux video trimming toolbox built with GPUI Kit. FFmpeg and ffprobe ship
-beside the application; installed builds never search `PATH` for media tools.
+Native Linux video trimming and layered composition toolbox built with GPUI Kit.
+FFmpeg and ffprobe ship beside the application; installed builds never search
+`PATH` for media tools.
 The 800 × 720 Home window has a full dashed drop area with a centered open button and up to three recent-video thumbnails.
 
 ## Run the Linux build
@@ -60,6 +61,14 @@ are available in the bundled export profile, and quality defaults to 100%.
 Background jobs report progress and support cancellation. Existing files are never replaced. Failed and cancelled
 exports remove their temporary output.
 
+Layered projects are stored as `.slicer.json` files. Open a project and use
+**Add media** (or drop several files into the editor) to keep video, image,
+text, shape, and audio assets as independent tracks. The project model keeps
+exact rational time ranges, source offsets, transforms, crop, opacity, layer
+order, audio gain, and undo/redo state. `Save` persists paths relative to the
+project when possible; missing paths are reported on reopen instead of silently
+flattening or replacing a layer.
+
 - **Fast cut:** copies compressed streams. Boundaries may move to nearby keyframes.
 - **Exact cut:** decodes and encodes to place the boundaries precisely; takes longer.
 - The initial native FFmpeg profile encodes MPEG-4/AAC in MP4 or MKV, and PCM WAV.
@@ -75,7 +84,10 @@ exports remove their temporary output.
   first-open latency.
 - Wayland desktops use XWayland for this embedded surface. Native Wayland and
   other-platform video surfaces require separate integration and validation.
-- Batch exports, hardware encoding, and multiple cut segments are deferred.
+- The layered export path renders the project graph at the requested output
+  resolution. The native preview remains the compatibility fast path for a
+  single video; full multi-layer live preview and hardware interoperability are
+  still platform-gated.
 
 ## Command-line verification
 
@@ -84,6 +96,12 @@ The same executable provides diagnostic commands without initializing the UI:
 ```sh
 slicer binaries
 slicer inspect "input video.mp4"
+slicer project create "cut.slicer.json" 1920 1080
+slicer project add "cut.slicer.json" "video.mp4" 0
+slicer project add "cut.slicer.json" "overlay.png" 0
+slicer project relink "cut.slicer.json" 1 "moved-video.mp4"
+slicer project inspect "cut.slicer.json"
+slicer project render "cut.slicer.json" "composite.mkv"
 slicer export "input video.mp4" "trimmed video.mp4" 1.5 8.0 exact
 slicer preview "input video.mp4" 2.5 frame.png
 ```
@@ -111,6 +129,18 @@ SLICER_TEST_FFMPEG_DIR=/absolute/path/to/bundled/bin \
 - `src/job.rs`: argument construction, progress, safe publication, cancellation.
 - `src/preview.rs`: bounded background still-frame decoding and seeking.
 - `src/native_player.rs`: persistent native video/audio player and diagnostics.
+- `src/project/`: rational-time layered project model, scene evaluation,
+  commands, storage, and the single-video compatibility adapter.
+- `src/composition/`: deterministic CPU reference compositor for RGBA, images,
+  shapes, crop, transforms, opacity, and text fallback.
+- `src/export.rs`: rational frame scheduling, composed MP4/MKV/GIF/WAV export,
+  cancellation, and no-overwrite publication.
+- `src/session.rs`: model-authoritative import/save/reopen/recovery session.
+- `src/engine/`: decoder fallback, playback contracts, clock, scheduler, audio
+  mixer, cache, and GPU lifecycle contracts.
+- `src/ui/layered_timeline.rs`, `canvas_tools.rs`, and `layer_inspector.rs`:
+  model-facing timeline and canvas interaction contracts (the legacy surface
+  remains the compatibility UI until the direct compositor route is validated).
 - `src/ui/native_surface.rs`, `native_preview.rs`: native drawable and editor coordination.
 - `resources/icons/hicolor/256x256/apps/slicer.png`: the application icon used
   by the native X11 window and Linux launcher package.

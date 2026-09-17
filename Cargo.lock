@@ -6269,6 +6269,7 @@ dependencies = [
  "gpui-kit",
  "image",
  "libloading",
+ "png 0.18.1",
  "raw-window-handle",
  "rfd",
  "serde",

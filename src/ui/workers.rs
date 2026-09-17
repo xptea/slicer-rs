@@ -121,6 +121,16 @@ impl SlicerApp {
                 self.open_file(path, window, cx);
             }
         }
+        if let Some(paths) = self
+            .add_media_dialog_rx
+            .as_ref()
+            .and_then(|rx| rx.try_recv().ok())
+        {
+            self.add_media_dialog_rx = None;
+            if let Some(paths) = paths {
+                self.add_media_files(paths);
+            }
+        }
         if let Some(path) = self
             .folder_dialog_rx
             .as_ref()
@@ -173,9 +183,103 @@ impl SlicerApp {
                 self.save_settings();
             }
         }
+        self.poll_import_events(cx);
+        self.poll_composition_preview_events(cx);
         self.poll_thumbnail_events(cx);
         self.poll_waveform_events(cx);
         self.poll_export_events(cx);
+    }
+
+    pub(super) fn poll_import_events(&mut self, cx: &mut Context<Self>) {
+        let mut results = Vec::new();
+        if let Some(receiver) = self.import_rx.as_ref() {
+            while let Ok(result) = receiver.try_recv() {
+                results.push(result);
+            }
+        }
+        if results.is_empty() {
+            return;
+        }
+
+        let mut added = 0_usize;
+        let mut failed = 0_usize;
+        for result in results {
+            self.import_pending = self.import_pending.saturating_sub(1);
+            let Some(session) = self.project_session.as_mut() else {
+                failed = failed.saturating_add(1);
+                continue;
+            };
+            match result.asset {
+                Ok(asset) => {
+                    let preview_path = (self.editor_path.is_none()
+                        && asset.kind == project::AssetKind::Video)
+                        .then(|| asset.path.clone());
+                    match session.import_asset(asset, project::Time::ZERO) {
+                        Ok(_) => {
+                            added = added.saturating_add(1);
+                            if let Some(path) = preview_path {
+                                self.start_project_video_preview(path);
+                            }
+                        }
+                        Err(error) => {
+                            failed = failed.saturating_add(1);
+                            self.status =
+                                format!("Could not add {}: {error}", result.path.display());
+                        }
+                    }
+                }
+                Err(error) => {
+                    failed = failed.saturating_add(1);
+                    self.status = format!("Could not inspect {}: {error}", result.path.display());
+                }
+            }
+        }
+        if self.import_pending == 0 {
+            self.import_rx = None;
+            self.status = match (added, failed) {
+                (0, 0) => "No media layers were added".to_owned(),
+                (added, 0) => format!("Added {added} media layer(s)"),
+                (0, failed) => format!("Could not add {failed} media layer(s)"),
+                (added, failed) => format!("Added {added} layer(s); {failed} failed"),
+            };
+            if added > 0 {
+                self.request_composition_preview();
+            }
+        } else if added > 0 || failed > 0 {
+            self.status = format!(
+                "Added {added} layer(s); {} still being inspected",
+                self.import_pending
+            );
+        }
+        cx.notify();
+    }
+
+    pub(super) fn poll_composition_preview_events(&mut self, cx: &mut Context<Self>) {
+        let mut events = Vec::new();
+        if let Some(worker) = self.composition_preview_worker.as_ref() {
+            while let Ok(event) = worker.events.try_recv() {
+                events.push(event);
+            }
+        }
+        for event in events {
+            if event.generation != self.composition_preview_generation {
+                continue;
+            }
+            self.preview_seconds = event.time.to_f64();
+            self.composition_preview_loading = false;
+            match event.result {
+                Ok(bytes) => {
+                    self.composition_preview_image =
+                        Some(Arc::new(Image::from_bytes(ImageFormat::Png, bytes)));
+                    self.composition_preview_error = None;
+                }
+                Err(error) => {
+                    self.composition_preview_error = Some(error.clone());
+                    self.status = format!("Layered preview failed: {error}");
+                }
+            }
+            cx.notify();
+        }
     }
 
     pub(super) fn poll_waveform_events(&mut self, cx: &mut Context<Self>) {
@@ -323,17 +427,38 @@ impl SlicerApp {
     pub(super) fn poll_export_events(&mut self, cx: &mut Context<Self>) {
         let mut events = Vec::new();
         if let Some(job) = self.export_job.as_ref() {
-            while let Ok(event) = job.events.try_recv() {
-                events.push(event);
+            match job {
+                UiExportJob::Legacy(job) => {
+                    while let Ok(event) = job.events.try_recv() {
+                        events.push(UiExportEvent::Legacy(event));
+                    }
+                }
+                UiExportJob::Composition(job) => {
+                    while let Ok(event) = job.events.try_recv() {
+                        events.push(UiExportEvent::Composition(event));
+                    }
+                }
             }
         }
         for event in events {
             match event {
-                job::JobEvent::Progress(progress) => {
+                UiExportEvent::Legacy(job::JobEvent::Progress(progress)) => {
                     self.export_progress = progress.clamp(0.0, 1.0);
                     self.status = format!("Exporting… {:.0}%", self.export_progress * 100.0);
                 }
-                job::JobEvent::Completed(path) => {
+                UiExportEvent::Composition(export::CompositionExportEvent::Progress {
+                    completed,
+                    total,
+                }) => {
+                    self.export_progress = if total == 0 {
+                        0.0
+                    } else {
+                        completed as f64 / total as f64
+                    };
+                    self.status = format!("Exporting… {:.0}%", self.export_progress * 100.0);
+                }
+                UiExportEvent::Legacy(job::JobEvent::Completed(path))
+                | UiExportEvent::Composition(export::CompositionExportEvent::Completed(path)) => {
                     self.export_progress = 1.0;
                     self.exported_path = Some(path.clone());
                     self.export_state = ExportState::Completed;
@@ -351,12 +476,14 @@ impl SlicerApp {
                         self.clipboard_rx = Some(rx);
                     }
                 }
-                job::JobEvent::Cancelled => {
+                UiExportEvent::Legacy(job::JobEvent::Cancelled)
+                | UiExportEvent::Composition(export::CompositionExportEvent::Cancelled) => {
                     self.export_state = ExportState::Cancelled;
                     self.status = "Export cancelled".to_owned();
                     self.export_job = None;
                 }
-                job::JobEvent::Failed(error) => {
+                UiExportEvent::Legacy(job::JobEvent::Failed(error))
+                | UiExportEvent::Composition(export::CompositionExportEvent::Failed(error)) => {
                     self.native.pause();
                     self.export_modal = true;
                     self.export_state = ExportState::Failed;
@@ -367,4 +494,9 @@ impl SlicerApp {
             cx.notify();
         }
     }
+}
+
+enum UiExportEvent {
+    Legacy(job::JobEvent),
+    Composition(export::CompositionExportEvent),
 }

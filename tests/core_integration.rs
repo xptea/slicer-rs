@@ -8,6 +8,8 @@
 //! SLICER_TEST_FFMPEG_DIR=/usr/bin cargo test --test core_integration -- --ignored
 //! ```
 
+#![allow(dead_code)]
+
 use slicer::job::{CropRect, ExportRequest, JobEvent, JobHandle, OutputFormat, TrimMode};
 use slicer::media::{self, Binaries};
 use std::path::{Path, PathBuf};

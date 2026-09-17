@@ -82,6 +82,9 @@ impl SlicerApp {
         if self.media.is_none() {
             return;
         }
+        if self.uses_composition_preview() {
+            return;
+        }
         if !self.native.paused {
             self.native.pause();
             return;
@@ -95,6 +98,10 @@ impl SlicerApp {
         self.native.play();
     }
     pub(super) fn poll_playback(&mut self, _cx: &mut Context<Self>) {
+        if self.uses_composition_preview() {
+            self.preview_error = self.composition_preview_error.clone();
+            return;
+        }
         if let Some(position) = self.native.poll()
             && self.timeline_drag.is_none()
         {
@@ -113,6 +120,7 @@ impl SlicerApp {
             };
             self.preview_seconds = position;
             self.native.seek(position, true);
+            self.request_composition_preview();
         }
     }
     pub(super) fn transport(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -127,7 +135,12 @@ impl SlicerApp {
                     .ghost()
                     .icon(gpui_kit::assets::IconName::SkipBack)
                     .rounded_full()
-                    .disabled(!self.native.ready || self.media.is_none() || self.crop.open)
+                    .disabled(
+                        !self.native.ready
+                            || self.media.is_none()
+                            || self.crop.open
+                            || self.uses_composition_preview(),
+                    )
                     .on_click(cx.listener(|this, _, _, cx| this.seek_to_trim_start(cx))),
             )
             .child(
@@ -143,7 +156,8 @@ impl SlicerApp {
                         !self.native.ready
                             || self.media.is_none()
                             || self.export_job.is_some()
-                            || self.crop.open,
+                            || self.crop.open
+                            || self.uses_composition_preview(),
                     )
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_playback(cx))),
             )
@@ -152,7 +166,12 @@ impl SlicerApp {
                     .ghost()
                     .icon(gpui_kit::assets::IconName::SkipForward)
                     .rounded_full()
-                    .disabled(!self.native.ready || self.media.is_none() || self.crop.open)
+                    .disabled(
+                        !self.native.ready
+                            || self.media.is_none()
+                            || self.crop.open
+                            || self.uses_composition_preview(),
+                    )
                     .on_click(cx.listener(|this, _, _, cx| this.seek_to_trim_end(cx))),
             );
         let mute = Button::new("mute-preview")
@@ -168,7 +187,12 @@ impl SlicerApp {
             } else {
                 gpui_kit::assets::IconName::Volume2
             })
-            .disabled(!self.native.ready || self.media.is_none() || self.crop.open)
+            .disabled(
+                !self.native.ready
+                    || self.media.is_none()
+                    || self.crop.open
+                    || self.uses_composition_preview(),
+            )
             .on_click(cx.listener(|this, _, _, _| this.native.toggle_mute()));
 
         div()
@@ -187,7 +211,11 @@ impl SlicerApp {
                             .ghost()
                             .rounded_full()
                             .icon(gpui_kit::assets::IconName::Crop)
-                            .disabled(!self.native.ready || self.export_job.is_some())
+                            .disabled(
+                                !self.native.ready
+                                    || self.export_job.is_some()
+                                    || self.uses_composition_preview(),
+                            )
                             .on_click(cx.listener(|this, _, _, cx| {
                                 if this.crop.open {
                                     this.crop.open = false;

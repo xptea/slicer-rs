@@ -611,6 +611,7 @@ impl SlicerApp {
                                     && crop.height == height
                             });
                         this.crop.applied = if full { None } else { this.selected_crop() };
+                        this.sync_project_crop();
                         this.native.set_crop(this.crop.applied);
                         this.crop.open = false;
                         this.finish_crop_drag();

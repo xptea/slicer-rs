@@ -116,6 +116,66 @@ pub struct MediaStream {
     pub channels: Option<u32>,
 }
 
+/// A reduced rational reported by FFmpeg (for example `30000/1001`).
+/// Keeping the numerator and denominator intact avoids turning source timing
+/// into a binary floating-point approximation at the media boundary.
+#[derive(Clone, Copy, Debug, Deserialize, serde::Serialize, PartialEq, Eq)]
+pub struct MediaRational {
+    pub numerator: i64,
+    pub denominator: i64,
+}
+
+impl MediaRational {
+    pub fn new(numerator: i64, denominator: i64) -> Option<Self> {
+        if denominator == 0 {
+            return None;
+        }
+        let sign = if denominator < 0 { -1 } else { 1 };
+        let numerator = numerator.checked_mul(sign)?;
+        let denominator = denominator.checked_mul(sign)?;
+        let divisor = gcd(numerator.unsigned_abs(), denominator.unsigned_abs());
+        let divisor = i64::try_from(divisor).ok().filter(|value| *value > 0)?;
+        Some(Self {
+            numerator: numerator / divisor,
+            denominator: denominator / divisor,
+        })
+    }
+
+    pub fn as_f64(self) -> f64 {
+        self.numerator as f64 / self.denominator as f64
+    }
+}
+
+/// Stream metadata needed by source-time mapping and color/orientation-aware
+/// composition.  `MediaInfo` remains the compact compatibility API used by
+/// the existing home screen and legacy player.
+#[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq)]
+pub struct DetailedMediaStream {
+    pub base: MediaStream,
+    pub time_base: Option<MediaRational>,
+    pub average_frame_rate: Option<MediaRational>,
+    pub nominal_frame_rate: Option<MediaRational>,
+    pub start_time: Option<f64>,
+    pub duration: Option<f64>,
+    pub frames: Option<u64>,
+    pub sample_rate: Option<u32>,
+    pub pixel_aspect_ratio: Option<MediaRational>,
+    pub color_range: Option<String>,
+    pub color_space: Option<String>,
+    pub pixel_format: Option<String>,
+    pub has_b_frames: Option<u32>,
+    pub rotation: Option<f64>,
+    pub has_alpha: bool,
+}
+
+/// Full probe result for the project/engine boundary.
+#[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq)]
+pub struct DetailedMediaInfo {
+    pub duration: f64,
+    pub size: u64,
+    pub streams: Vec<DetailedMediaStream>,
+}
+
 /// Inspect a media file with the bundled `ffprobe` and parse its JSON output.
 pub fn inspect(binaries: &Binaries, input: &Path) -> Result<MediaInfo> {
     binaries.validate()?;
@@ -125,47 +185,9 @@ pub fn inspect(binaries: &Binaries, input: &Path) -> Result<MediaInfo> {
         bail!("media input is not a regular file: {}", input.display());
     }
 
-    // Keep the input as a direct argument.  In particular, do not construct a
-    // shell command: paths may contain spaces, Unicode, or shell metacharacters.
-    let output = Command::new(&binaries.ffprobe)
-        .args([
-            "-v",
-            "error",
-            "-show_streams",
-            "-show_format",
-            "-print_format",
-            "json",
-            "--",
-        ])
-        .arg(input)
-        .output()
-        .with_context(|| format!("failed to launch ffprobe for {}", input.display()))?;
+    let raw = probe_document(binaries, input)?;
 
-    if !output.status.success() {
-        let stderr = bounded_text(&output.stderr, MAX_DIAGNOSTIC_BYTES);
-        if stderr.is_empty() {
-            bail!(
-                "ffprobe failed for {} with status {}",
-                input.display(),
-                output.status
-            );
-        }
-        bail!(
-            "ffprobe failed for {} with status {}: {}",
-            input.display(),
-            output.status,
-            stderr
-        );
-    }
-
-    let raw: ProbeDocument = serde_json::from_slice(&output.stdout)
-        .with_context(|| format!("ffprobe returned invalid JSON for {}", input.display()))?;
-
-    let duration = raw
-        .format
-        .as_ref()
-        .and_then(|format| value_as_f64(format.duration.as_ref()))
-        .unwrap_or(0.0);
+    let duration = document_duration(&raw);
     if !duration.is_finite() || duration < 0.0 {
         bail!(
             "ffprobe returned an invalid duration for {}",
@@ -173,11 +195,7 @@ pub fn inspect(binaries: &Binaries, input: &Path) -> Result<MediaInfo> {
         );
     }
 
-    let size = raw
-        .format
-        .as_ref()
-        .and_then(|format| value_as_u64(format.size.as_ref()))
-        .unwrap_or(metadata.len());
+    let size = document_size(&raw, metadata.len());
 
     let streams = raw
         .streams
@@ -199,6 +217,317 @@ pub fn inspect(binaries: &Binaries, input: &Path) -> Result<MediaInfo> {
         size,
         streams,
     })
+}
+
+/// Inspect a media file while preserving stream timing and presentation
+/// metadata.  This calls the same explicit bundled `ffprobe` as [`inspect`]
+/// and never discovers a system executable through `PATH`.
+pub fn inspect_detailed(binaries: &Binaries, input: &Path) -> Result<DetailedMediaInfo> {
+    binaries.validate()?;
+    let metadata = fs::metadata(input)
+        .with_context(|| format!("unable to read media file {}", input.display()))?;
+    if !metadata.is_file() {
+        bail!("media input is not a regular file: {}", input.display());
+    }
+    let raw = probe_document(binaries, input)?;
+    let duration = document_duration(&raw);
+    if !duration.is_finite() || duration < 0.0 {
+        bail!(
+            "ffprobe returned an invalid duration for {}",
+            input.display()
+        );
+    }
+    let size = document_size(&raw, metadata.len());
+    let streams = raw
+        .streams
+        .unwrap_or_default()
+        .into_iter()
+        .enumerate()
+        .map(|(position, stream)| {
+            let base = base_stream(&stream, position);
+            let pixel_format = stream.pixel_format.clone();
+            let rotation = stream_rotation(&stream);
+            DetailedMediaStream {
+                base,
+                time_base: stream.time_base.as_deref().and_then(parse_rational),
+                average_frame_rate: stream
+                    .average_frame_rate
+                    .as_deref()
+                    .and_then(parse_rational),
+                nominal_frame_rate: stream
+                    .nominal_frame_rate
+                    .as_deref()
+                    .and_then(parse_rational),
+                start_time: stream
+                    .start_time
+                    .as_ref()
+                    .and_then(|value| value_as_f64(Some(value))),
+                duration: stream
+                    .duration
+                    .as_ref()
+                    .and_then(|value| value_as_f64(Some(value))),
+                frames: stream
+                    .frames
+                    .as_ref()
+                    .and_then(|value| value_as_u64(Some(value))),
+                sample_rate: stream.sample_rate.as_ref().and_then(value_as_u32),
+                pixel_aspect_ratio: stream
+                    .pixel_aspect_ratio
+                    .as_deref()
+                    .and_then(parse_rational),
+                color_range: stream.color_range,
+                color_space: stream.color_space,
+                pixel_format,
+                has_b_frames: stream.has_b_frames.as_ref().and_then(value_as_u32),
+                rotation,
+                has_alpha: stream
+                    .pixel_format
+                    .as_deref()
+                    .is_some_and(pixel_format_has_alpha),
+            }
+        })
+        .collect();
+    Ok(DetailedMediaInfo {
+        duration,
+        size,
+        streams,
+    })
+}
+
+/// Inspect a source and construct the project asset metadata used by the
+/// layered session. This is kept at the media boundary so UI import workers
+/// and headless callers make the same classification and timing decisions.
+pub fn inspect_project_asset(binaries: &Binaries, input: &Path) -> Result<crate::project::Asset> {
+    let info = inspect_detailed(binaries, input)?;
+    let video = info
+        .streams
+        .iter()
+        .find(|stream| stream.base.kind == "video");
+    let audio = info
+        .streams
+        .iter()
+        .find(|stream| stream.base.kind == "audio");
+
+    if is_still_image_path(input) {
+        let stream = video.context("image input has no video stream")?;
+        let width = stream.base.width.context("image width is unknown")?;
+        let height = stream.base.height.context("image height is unknown")?;
+        let mut asset =
+            crate::project::Asset::image(crate::project::AssetId::fresh(), input, width, height)?;
+        if let crate::project::AssetMetadata::Image(metadata) = &mut asset.metadata {
+            metadata.orientation = orientation_from_rotation(stream.rotation);
+            metadata.pixel_aspect = project_rational(stream.pixel_aspect_ratio)
+                .filter(|value| *value > crate::project::Time::ZERO)
+                .unwrap_or(crate::project::Rational::ONE);
+        }
+        return Ok(asset);
+    }
+
+    if let Some(stream) = video {
+        let width = stream.base.width.context("video width is unknown")?;
+        let height = stream.base.height.context("video height is unknown")?;
+        let duration = positive_duration(info.duration)
+            .or_else(|| stream.duration.and_then(positive_duration))
+            .context("video duration is unknown")?;
+        let mut asset = crate::project::Asset::video(
+            crate::project::AssetId::fresh(),
+            input,
+            crate::project::Rational::from_seconds(duration)?,
+            width,
+            height,
+        )?;
+        if let crate::project::AssetMetadata::Video(metadata) = &mut asset.metadata {
+            metadata.time_base = project_rational(stream.time_base)
+                .filter(|value| *value > crate::project::Time::ZERO)
+                .unwrap_or(crate::project::Rational::ONE);
+            metadata.frame_rate = stream
+                .average_frame_rate
+                .or(stream.nominal_frame_rate)
+                .and_then(project_frame_rate);
+            metadata.orientation = orientation_from_rotation(stream.rotation);
+            metadata.pixel_aspect = project_rational(stream.pixel_aspect_ratio)
+                .filter(|value| *value > crate::project::Time::ZERO)
+                .unwrap_or(crate::project::Rational::ONE);
+            metadata.has_audio = audio.is_some();
+        }
+        return Ok(asset);
+    }
+
+    if let Some(stream) = audio {
+        let duration = positive_duration(info.duration)
+            .or_else(|| stream.duration.and_then(positive_duration))
+            .context("audio duration is unknown")?;
+        let sample_rate = stream.sample_rate.unwrap_or(48_000);
+        let channels = stream.base.channels.unwrap_or(2);
+        let channels = u16::try_from(channels).context("audio channel count is too large")?;
+        return Ok(crate::project::Asset::audio(
+            crate::project::AssetId::fresh(),
+            input,
+            crate::project::Rational::from_seconds(duration)?,
+            sample_rate,
+            channels,
+        )?);
+    }
+
+    bail!("input has no supported video, image, or audio stream")
+}
+
+fn positive_duration(value: f64) -> Option<f64> {
+    value
+        .is_finite()
+        .then_some(value)
+        .filter(|value| *value > 0.0)
+}
+
+fn is_still_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "bmp" | "jpeg" | "jpg" | "png" | "tif" | "tiff" | "webp"
+            )
+        })
+}
+
+fn project_rational(value: Option<MediaRational>) -> Option<crate::project::Rational> {
+    let value = value?;
+    let denominator = u32::try_from(value.denominator).ok()?;
+    crate::project::Rational::new(value.numerator, denominator).ok()
+}
+
+fn project_frame_rate(value: MediaRational) -> Option<crate::project::FrameRate> {
+    let numerator = u32::try_from(value.numerator).ok()?;
+    let denominator = u32::try_from(value.denominator).ok()?;
+    crate::project::FrameRate::new(numerator, denominator).ok()
+}
+
+fn orientation_from_rotation(rotation: Option<f64>) -> crate::project::Orientation {
+    let Some(rotation) = rotation.filter(|rotation| rotation.is_finite()) else {
+        return crate::project::Orientation::Normal;
+    };
+    let normalized = (rotation.round() as i64).rem_euclid(360);
+    match normalized {
+        90 => crate::project::Orientation::Rotate90,
+        180 => crate::project::Orientation::Rotate180,
+        270 => crate::project::Orientation::Rotate270,
+        _ => crate::project::Orientation::Normal,
+    }
+}
+
+fn probe_document(binaries: &Binaries, input: &Path) -> Result<ProbeDocument> {
+    // Keep the input as a direct argument. In particular, do not construct a
+    // shell command: paths may contain spaces, Unicode, or shell metacharacters.
+    let output = Command::new(&binaries.ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-show_streams",
+            "-show_format",
+            "-print_format",
+            "json",
+            "--",
+        ])
+        .arg(input)
+        .output()
+        .with_context(|| format!("failed to launch ffprobe for {}", input.display()))?;
+    if !output.status.success() {
+        let stderr = bounded_text(&output.stderr, MAX_DIAGNOSTIC_BYTES);
+        if stderr.is_empty() {
+            bail!(
+                "ffprobe failed for {} with status {}",
+                input.display(),
+                output.status
+            );
+        }
+        bail!(
+            "ffprobe failed for {} with status {}: {}",
+            input.display(),
+            output.status,
+            stderr
+        );
+    }
+    serde_json::from_slice(&output.stdout)
+        .with_context(|| format!("ffprobe returned invalid JSON for {}", input.display()))
+}
+
+fn document_duration(raw: &ProbeDocument) -> f64 {
+    raw.format
+        .as_ref()
+        .and_then(|format| value_as_f64(format.duration.as_ref()))
+        .unwrap_or(0.0)
+}
+
+fn document_size(raw: &ProbeDocument, fallback: u64) -> u64 {
+    raw.format
+        .as_ref()
+        .and_then(|format| value_as_u64(format.size.as_ref()))
+        .unwrap_or(fallback)
+}
+
+fn base_stream(stream: &ProbeStream, position: usize) -> MediaStream {
+    MediaStream {
+        index: stream.index.unwrap_or(position as u32),
+        kind: stream
+            .codec_type
+            .clone()
+            .unwrap_or_else(|| "unknown".to_owned()),
+        codec: stream
+            .codec_name
+            .clone()
+            .unwrap_or_else(|| "unknown".to_owned()),
+        width: stream.width.as_ref().and_then(value_as_u32),
+        height: stream.height.as_ref().and_then(value_as_u32),
+        channels: stream.channels.as_ref().and_then(value_as_u32),
+    }
+}
+
+fn parse_rational(value: &str) -> Option<MediaRational> {
+    let (numerator, denominator) = value.split_once('/')?;
+    let numerator = numerator.trim().parse().ok()?;
+    let denominator = denominator.trim().parse().ok()?;
+    MediaRational::new(numerator, denominator)
+}
+
+fn stream_rotation(stream: &ProbeStream) -> Option<f64> {
+    let tag_rotation = stream
+        .tags
+        .as_ref()
+        .and_then(|tags| tags.get("rotate"))
+        .and_then(|value| value_as_f64(Some(value)));
+    let side_rotation = stream.side_data.as_ref().and_then(|side_data| {
+        side_data.iter().find_map(|entry| {
+            entry
+                .get("rotation")
+                .and_then(|value| value_as_f64(Some(value)))
+                .or_else(|| {
+                    entry.get("displaymatrix").and_then(|value| {
+                        value.as_str().and_then(|matrix| {
+                            matrix.lines().find_map(|line| line.trim().parse().ok())
+                        })
+                    })
+                })
+        })
+    });
+    side_rotation.or(tag_rotation)
+}
+
+fn pixel_format_has_alpha(format: &str) -> bool {
+    let format = format.to_ascii_lowercase();
+    format.contains("rgba")
+        || format.contains("argb")
+        || format.contains("abgr")
+        || format.contains("yuva")
+        || format.ends_with('a')
+}
+
+fn gcd(mut left: u64, mut right: u64) -> u64 {
+    while right != 0 {
+        let remainder = left % right;
+        left = right;
+        right = remainder;
+    }
+    left
 }
 
 const MAX_DIAGNOSTIC_BYTES: usize = 16 * 1024;
@@ -284,12 +613,46 @@ struct ProbeFormat {
 
 #[derive(Debug, Deserialize)]
 struct ProbeStream {
+    #[serde(default)]
     index: Option<u32>,
+    #[serde(default)]
     codec_type: Option<String>,
+    #[serde(default)]
     codec_name: Option<String>,
+    #[serde(default)]
     width: Option<Value>,
+    #[serde(default)]
     height: Option<Value>,
+    #[serde(default)]
     channels: Option<Value>,
+    #[serde(default)]
+    time_base: Option<String>,
+    #[serde(default, alias = "avg_frame_rate")]
+    average_frame_rate: Option<String>,
+    #[serde(default, alias = "r_frame_rate")]
+    nominal_frame_rate: Option<String>,
+    #[serde(default)]
+    start_time: Option<Value>,
+    #[serde(default)]
+    duration: Option<Value>,
+    #[serde(default, alias = "nb_frames")]
+    frames: Option<Value>,
+    #[serde(default)]
+    sample_rate: Option<Value>,
+    #[serde(default, alias = "sample_aspect_ratio")]
+    pixel_aspect_ratio: Option<String>,
+    #[serde(default)]
+    color_range: Option<String>,
+    #[serde(default, alias = "color_space")]
+    color_space: Option<String>,
+    #[serde(default, alias = "pix_fmt")]
+    pixel_format: Option<String>,
+    #[serde(default)]
+    has_b_frames: Option<Value>,
+    #[serde(default)]
+    tags: Option<std::collections::HashMap<String, Value>>,
+    #[serde(default, alias = "side_data_list")]
+    side_data: Option<Vec<std::collections::HashMap<String, Value>>>,
 }
 
 #[cfg(test)]

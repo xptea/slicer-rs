@@ -1,0 +1,107 @@
+{
+  "schema": "slicer.benchmark-fixtures.v1",
+  "fixture_set": "p0-layered-editor",
+  "synthetic_scene": "compositor_scene.json",
+  "media_root": "media",
+  "media": [
+    {
+      "id": "moving-1080p30-short-gop",
+      "file": "moving-1080p30-short-gop.mp4",
+      "kind": "video",
+      "expected_video_streams": 1,
+      "expected_audio_streams": 0,
+      "width": 1920,
+      "height": 1080,
+      "audio_sample_rate": null,
+      "tags": ["numbered-moving-frames", "short-gop", "1080p30"]
+    },
+    {
+      "id": "moving-1080p30-long-gop",
+      "file": "moving-1080p30-long-gop.mp4",
+      "kind": "video",
+      "expected_video_streams": 1,
+      "expected_audio_streams": 0,
+      "width": 1920,
+      "height": 1080,
+      "audio_sample_rate": null,
+      "tags": ["numbered-moving-frames", "long-gop", "1080p30"]
+    },
+    {
+      "id": "moving-1080p30-audio-44k",
+      "file": "moving-1080p30-audio-44k.mp4",
+      "kind": "video-audio",
+      "expected_video_streams": 1,
+      "expected_audio_streams": 1,
+      "width": 1920,
+      "height": 1080,
+      "audio_sample_rate": 44100,
+      "tags": ["timed-impulses", "44.1khz", "1080p30"]
+    },
+    {
+      "id": "moving-1080p60-audio-48k",
+      "file": "moving-1080p60-audio-48k.mp4",
+      "kind": "video-audio",
+      "expected_video_streams": 1,
+      "expected_audio_streams": 1,
+      "width": 1920,
+      "height": 1080,
+      "audio_sample_rate": 48000,
+      "tags": ["timed-impulses", "48khz", "1080p60"]
+    },
+    {
+      "id": "moving-4k30-video-only",
+      "file": "moving-4k30-video-only.mkv",
+      "kind": "video",
+      "expected_video_streams": 1,
+      "expected_audio_streams": 0,
+      "width": 3840,
+      "height": 2160,
+      "audio_sample_rate": null,
+      "tags": ["numbered-moving-frames", "4k", "video-without-audio"]
+    },
+    {
+      "id": "variable-frame-rate",
+      "file": "variable-frame-rate.mp4",
+      "kind": "video",
+      "expected_video_streams": 1,
+      "expected_audio_streams": 0,
+      "width": 640,
+      "height": 360,
+      "audio_sample_rate": null,
+      "tags": ["vfr", "timestamp-gaps"]
+    },
+    {
+      "id": "rotation-and-sar",
+      "file": "rotation-and-sar.mp4",
+      "kind": "video",
+      "expected_video_streams": 1,
+      "expected_audio_streams": 0,
+      "width": 640,
+      "height": 360,
+      "audio_sample_rate": null,
+      "tags": ["rotation-90", "non-square-pixels"]
+    },
+    {
+      "id": "unicode-path-and-text",
+      "file": "unicode café 日本/moving-text-日本.mp4",
+      "kind": "video",
+      "expected_video_streams": 1,
+      "expected_audio_streams": 0,
+      "width": 320,
+      "height": 180,
+      "audio_sample_rate": null,
+      "tags": ["unicode-path", "unicode-metadata"]
+    },
+    {
+      "id": "alpha-overlay",
+      "file": "alpha-overlay.png",
+      "kind": "image-alpha",
+      "expected_video_streams": 1,
+      "expected_audio_streams": 0,
+      "width": 64,
+      "height": 64,
+      "audio_sample_rate": null,
+      "tags": ["rgba", "alpha-image"]
+    }
+  ]
+}
