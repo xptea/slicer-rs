@@ -21,7 +21,9 @@ impl SlicerApp {
                         if let Some(paths) = this.external_drop.take() {
                             cx.stop_active_drag(window);
                             cx.stop_propagation();
-                            if let Some(path) = paths.paths().first().cloned() {
+                            if this.screen == Screen::Studio {
+                                this.studio_import(paths.paths().to_vec());
+                            } else if let Some(path) = paths.paths().first().cloned() {
                                 this.open_file(path, window, cx);
                             }
                             cx.notify();

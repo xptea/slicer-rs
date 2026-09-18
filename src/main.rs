@@ -13,7 +13,10 @@ fn main() {
 }
 fn run() -> Result<()> {
     let args: Vec<_> = std::env::args_os().skip(1).collect();
-    if args.is_empty() || (args.len() == 2 && args[0] == "open") {
+    if args.is_empty()
+        || (args.len() == 2 && args[0] == "open")
+        || (args.len() <= 2 && args[0] == "studio")
+    {
         // Native video currently embeds an X11 drawable. Use XWayland on Wayland
         // desktops, selected before GPUI or any worker threads are initialized.
         #[cfg(all(feature = "desktop", target_os = "linux"))]
@@ -29,7 +32,10 @@ fn run() -> Result<()> {
         }
         #[cfg(feature = "desktop")]
         {
-            ui::run(args.get(1).map(std::path::PathBuf::from));
+            ui::run(
+                args.get(1).map(std::path::PathBuf::from),
+                args.first().is_some_and(|a| a == "studio"),
+            );
             return Ok(());
         }
         #[cfg(not(feature = "desktop"))]
@@ -37,8 +43,25 @@ fn run() -> Result<()> {
     }
     match args[0].to_str() {
         Some("--help" | "-h") => println!(
-            "Slicer\n  slicer                  Open the desktop app\n  slicer open INPUT       Open a file in the editor\n  slicer inspect INPUT    Inspect media using bundled ffprobe\n  slicer export INPUT OUTPUT START END [fast|exact]\n  slicer preview INPUT SECONDS OUTPUT.png\n  slicer binaries         Print resolved bundled tool paths\n\nExport output uses the destination extension (.mp4, .mkv, .webm, .mp3, .wav, or .gif).\nExports never replace existing files. Times are seconds.\nSLICER_FFMPEG_DIR explicitly overrides bundled tools for development."
+            "Slicer\n  slicer                  Open the desktop app\n  slicer open INPUT       Open a file in the editor\n  slicer studio [PROJECT]  Open multitrack editor\n  slicer project-export PROJECT OUTPUT.mp4\n  slicer inspect INPUT    Inspect media using bundled ffprobe\n  slicer export INPUT OUTPUT START END [fast|exact]\n  slicer preview INPUT SECONDS OUTPUT.png\n  slicer binaries         Print resolved bundled tool paths\n\nExport output uses the destination extension (.mp4, .mkv, .webm, .mp3, .wav, or .gif).\nExports never replace existing files. Times are seconds.\nSLICER_FFMPEG_DIR explicitly overrides bundled tools for development."
         ),
+        #[cfg(feature = "desktop")]
+        Some("project-export") if args.len() == 3 => {
+            let project = slicer::engine::project::Project::load(std::path::Path::new(&args[1]))?;
+            let handle =
+                slicer::engine::export::ExportHandle::spawn(project, args[2].clone().into())?;
+            loop {
+                match handle.events.recv()? {
+                    slicer::engine::export::ExportEvent::Progress(p) => {
+                        eprintln!("Export {:.0}%", p * 100.)
+                    }
+                    slicer::engine::export::ExportEvent::Finished(result) => {
+                        println!("Saved {}", result.map_err(anyhow::Error::msg)?.display());
+                        break;
+                    }
+                }
+            }
+        }
         Some("binaries") => {
             let bins = media::Binaries::resolve()?;
             println!(

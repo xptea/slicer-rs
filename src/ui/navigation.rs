@@ -37,6 +37,7 @@ impl SlicerApp {
             .disabled(self.export_job.is_some())
             .on_click(cx.listener(|this, _, _, _| {
                 if this.export_job.is_none() {
+                    this.studio_pause();
                     this.native.pause();
                     this.screen = Screen::Settings;
                 }

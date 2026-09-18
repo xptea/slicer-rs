@@ -328,6 +328,7 @@ struct SeekRequest {
 /// seek/control replies avoid clobbering a newer request.
 #[derive(Clone, Copy)]
 enum PendingCommand {
+    Speed,
     Load,
     Seek(SeekRequest),
     Pause(bool),
@@ -347,6 +348,7 @@ struct PendingControls {
     muted: Option<bool>,
     range: Option<Range>,
     crop: Option<String>,
+    speed: Option<f64>,
 }
 
 struct SharedState {
@@ -531,6 +533,7 @@ pub struct NativePlayer {
     state: Arc<SharedState>,
     worker: Option<JoinHandle<()>>,
     window_id: u64,
+    render_handle: usize,
 }
 
 impl NativePlayer {
@@ -545,7 +548,22 @@ impl NativePlayer {
 
     /// Create a player from an explicit libmpv path for development/tests.
     pub fn new_with_library(window_id: u64, library: impl AsRef<Path>) -> Result<Self, String> {
-        let library = library.as_ref().to_path_buf();
+        Self::new_internal(window_id, library.as_ref(), false)
+    }
+
+    /// A controller for a caller-owned OpenGL render context. Audio is mixed by the timeline.
+    pub(crate) fn new_for_render() -> Result<Self, String> {
+        Self::new_internal(0, &resolve_mpv_library()?, true)
+    }
+
+    /// Only the render API may use this handle, on a separate render thread.
+    /// The render context must be freed before dropping this player.
+    pub(crate) fn render_handle(&self) -> *mut c_void {
+        self.render_handle as *mut c_void
+    }
+
+    fn new_internal(window_id: u64, library: &Path, render: bool) -> Result<Self, String> {
+        let library = library.to_path_buf();
         if !library.is_file() {
             return Err(format!(
                 "libmpv library does not exist: {}",
@@ -573,10 +591,15 @@ impl NativePlayer {
         let worker = thread::Builder::new()
             .name("slicer-native-player".to_owned())
             .spawn(move || {
-                match PlayerWorker::initialize(api, window_id, worker_shared.clone(), worker_state)
-                {
+                match PlayerWorker::initialize(
+                    api,
+                    window_id,
+                    render,
+                    worker_shared.clone(),
+                    worker_state,
+                ) {
                     Ok(worker) => {
-                        let _ = ready_tx.send(Ok(()));
+                        let _ = ready_tx.send(Ok(worker.handle as usize));
                         worker.run(receiver);
                     }
                     Err(error) => {
@@ -588,13 +611,14 @@ impl NativePlayer {
 
         let ready_began = Instant::now();
         match ready_rx.recv_timeout(Duration::from_secs(3)) {
-            Ok(Ok(())) => {
+            Ok(Ok(render_handle)) => {
                 startup_timing("worker_ready_wait", ready_began);
                 Ok(Self {
                     shared,
                     state,
                     worker: Some(worker),
                     window_id,
+                    render_handle,
                 })
             }
             Ok(Err(error)) => {
@@ -618,6 +642,11 @@ impl NativePlayer {
     /// Load a file without setting a stopping range.
     pub fn load(&self, path: impl AsRef<Path>) -> Result<(), String> {
         self.queue_load(path.as_ref(), 0.0, None)
+    }
+
+    /// Load an externally timed source directly at its first needed frame.
+    pub(crate) fn load_at(&self, path: &Path, start: f64) -> Result<(), String> {
+        self.queue_load(path, start, None)
     }
 
     /// Load a file, beginning at start and pausing at end.
@@ -647,6 +676,14 @@ impl NativePlayer {
     pub fn set_paused(&self, paused: bool) -> Result<(), String> {
         self.state.paused.store(paused, Ordering::Release);
         self.with_controls(|controls| controls.paused = Some(paused))
+    }
+
+    /// Small clock correction for externally mixed multitrack audio; never seeks.
+    pub(crate) fn set_clock_speed(&self, speed: f64) -> Result<(), String> {
+        if !speed.is_finite() || !(0.95..=1.05).contains(&speed) {
+            return Err("Invalid video clock correction".into());
+        }
+        self.with_controls(|controls| controls.speed = Some(speed))
     }
 
     /// Mute or unmute native audio output.
@@ -819,6 +856,7 @@ impl PlayerWorker {
     fn initialize(
         api: MpvApi,
         window_id: u64,
+        render: bool,
         shared: Arc<Shared>,
         state: Arc<SharedState>,
     ) -> Result<Self, String> {
@@ -828,7 +866,7 @@ impl PlayerWorker {
         }
 
         let setup_began = Instant::now();
-        let setup = Self::configure(&api, handle, window_id).and_then(|()| {
+        let setup = Self::configure(&api, handle, window_id, render).and_then(|()| {
             let code = unsafe { (api.initialize)(handle) };
             if code < 0 {
                 Err(format!("libmpv initialization failed: {}", unsafe {
@@ -871,7 +909,12 @@ impl PlayerWorker {
         Ok(worker)
     }
 
-    fn configure(api: &MpvApi, handle: *mut MpvHandle, window_id: u64) -> Result<(), String> {
+    fn configure(
+        api: &MpvApi,
+        handle: *mut MpvHandle,
+        window_id: u64,
+        render: bool,
+    ) -> Result<(), String> {
         let basic = [
             ("config", "no"),
             ("idle", "yes"),
@@ -906,7 +949,22 @@ impl PlayerWorker {
             set_option_cstring(api, handle, "log-file", &log_path)?;
         }
 
-        if window_id == 0 {
+        if render {
+            set_option(api, handle, "vo", "libmpv")?;
+            set_option(api, handle, "aid", "no")?;
+            set_option(api, handle, "keepaspect", "no")?;
+            set_option(api, handle, "video-sync", "audio")?;
+            set_option(api, handle, "video-timing-offset", "0")?;
+            set_option(
+                api,
+                handle,
+                "hwdec",
+                &std::env::var("SLICER_MPV_HWDEC").unwrap_or("nvdec,vaapi".into()),
+            )?;
+            // Render every source into a common SDR sRGB space for the compositor.
+            set_option(api, handle, "target-prim", "bt.709")?;
+            set_option(api, handle, "target-trc", "srgb")?;
+        } else if window_id == 0 {
             // Zero is useful for headless integration tests and package
             // diagnostics. Production UI supplies a real X11 child id.
             set_option(api, handle, "vo", "null")?;
@@ -1065,6 +1123,14 @@ impl PlayerWorker {
             return;
         };
 
+        if let Some(speed) = controls.speed {
+            if let Err(error) = self.command_async(
+                &["set", "speed", &format!("{speed:.6}")],
+                PendingCommand::Speed,
+            ) {
+                self.state.set_error(error);
+            }
+        }
         if let Some(crop) = controls.crop
             && let Err(error) =
                 self.command_async(&["set", "video-crop", &crop], PendingCommand::Crop)
@@ -1385,6 +1451,9 @@ impl PlayerWorker {
 
         let error = unsafe { self.api.error(event_error) };
         match command {
+            PendingCommand::Speed => self
+                .state
+                .set_error(format!("Video clock correction failed: {error}")),
             PendingCommand::Crop => self
                 .state
                 .set_error(format!("Could not crop preview: {error}")),

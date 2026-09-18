@@ -6266,6 +6266,7 @@ name = "slicer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "cc",
  "gpui-kit",
  "image",
  "libloading",

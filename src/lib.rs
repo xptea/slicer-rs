@@ -6,4 +6,5 @@ pub mod home;
 
 pub mod native_player;
 
+pub mod engine;
 pub mod waveform;

@@ -15,7 +15,7 @@
 *.profraw
 coverage/
 
-# The two GPUI patches below are source dependencies and must stay visible to
+# The GPUI patches below are source dependencies and must stay visible to
 # version control. Ignore any other vendored/generated material.
 /vendor/*
 !/vendor/gpui-pre-linux/

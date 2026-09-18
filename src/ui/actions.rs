@@ -199,6 +199,10 @@ impl SlicerApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.screen == Screen::Studio {
+            self.studio_key(event, cx);
+            return;
+        }
         if self.screen != Screen::Editor {
             return;
         }
@@ -481,6 +485,7 @@ impl SlicerApp {
     }
 
     pub(super) fn show_home(&mut self) {
+        self.studio_pause();
         self.native.pause();
         if self.export_job.is_some() {
             self.screen = Screen::Editor;

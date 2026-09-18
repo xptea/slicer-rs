@@ -20,6 +20,7 @@ mod navigation;
 mod playhead_clock;
 mod preview_panel;
 mod settings_view;
+mod studio;
 mod theme;
 mod timeline;
 mod window_frame;
@@ -52,6 +53,7 @@ enum Screen {
     Home,
     Editor,
     Settings,
+    Studio,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -92,6 +94,7 @@ enum DialogKind {
 /// The application view.  All receivers are polled from a lightweight GPUI
 /// timer so no filesystem or FFmpeg call can hold up a frame.
 pub struct SlicerApp {
+    studio: Option<studio::Studio>,
     binaries: Option<media::Binaries>,
     binaries_error: Option<String>,
     screen: Screen,
@@ -227,6 +230,7 @@ impl SlicerApp {
         let mut app = Self {
             binaries: binaries.clone(),
             binaries_error,
+            studio: None,
             screen: Screen::Home,
             external_drop: None,
             focus_handle: cx.focus_handle(),
@@ -318,6 +322,7 @@ impl SlicerApp {
 impl Render for SlicerApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.poll_background(window, cx);
+        self.poll_studio(window);
         if !cx.has_active_drag() {
             self.external_drop = None;
         }
@@ -335,6 +340,7 @@ impl Render for SlicerApp {
             Screen::Home => self.home_view(cx),
             Screen::Editor => self.editor_view(cx),
             Screen::Settings => self.settings_view(cx),
+            Screen::Studio => self.studio_view(cx),
         };
         let view = v_flex()
             .size_full()
@@ -343,7 +349,13 @@ impl Render for SlicerApp {
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(|this, event, window, cx| this.handle_key(event, window, cx)))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                if this.crop.open {
+                if this.screen == Screen::Studio {
+                    this.studio_drag(
+                        event.position,
+                        event.pressed_button == Some(MouseButton::Left),
+                        cx,
+                    );
+                } else if this.crop.open {
                     if event.pressed_button == Some(MouseButton::Left) {
                         this.drag_crop(event.position, event.modifiers.shift);
                     } else {
@@ -362,7 +374,10 @@ impl Render for SlicerApp {
             }))
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(|this, _, _, cx| {
+                cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                    if this.screen == Screen::Studio {
+                        this.studio_drag(event.position, false, cx);
+                    }
                     this.finish_crop_drag();
                     this.finish_timeline_drag(cx);
                 }),
@@ -414,7 +429,7 @@ impl Render for SlicerApp {
     }
 }
 
-pub fn run(initial_file: Option<PathBuf>) {
+pub fn run(initial_file: Option<PathBuf>, studio: bool) {
     let binaries = match media::Binaries::resolve() {
         Ok(binaries) => Some(binaries),
         Err(error) => {
@@ -431,7 +446,13 @@ pub fn run(initial_file: Option<PathBuf>) {
             gpui_kit::init(cx);
             theme::apply(cx);
             let options = WindowOptions {
-                window_bounds: Some(WindowBounds::centered(size(px(800.), px(720.)), cx)),
+                window_bounds: Some(WindowBounds::centered(
+                    size(
+                        px(if studio { 1280. } else { 800. }),
+                        px(if studio { 840. } else { 720. }),
+                    ),
+                    cx,
+                )),
                 titlebar: Some(TitlebarOptions {
                     title: Some("Slicer".into()),
                     ..TitlebarOptions::default()
@@ -449,14 +470,22 @@ pub fn run(initial_file: Option<PathBuf>) {
                 let view = cx.new(|cx| {
                     let mut app =
                         SlicerApp::new(window, cx, binaries.clone(), binaries_error.clone());
-                    if let Some(path) = initial_file.clone() {
+                    if studio {
+                        app.enter_studio();
+                        if let Some(path) = initial_file.clone() {
+                            app.studio_open_project(path);
+                        }
+                    } else if let Some(path) = initial_file.clone() {
                         app.open_file(path, window, cx);
                     }
                     app
                 });
                 let closing_view = view.downgrade();
                 window.on_window_should_close(cx, move |_, cx| {
-                    let _ = closing_view.update(cx, |this, _| this.native.shutdown());
+                    let _ = closing_view.update(cx, |this, _| {
+                        this.studio = None;
+                        this.native.shutdown()
+                    });
                     true
                 });
                 cx.new(|cx| {

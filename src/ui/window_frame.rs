@@ -45,7 +45,10 @@ pub(super) fn frame(
             surface.child(
                 TitleBar::new()
                     .on_close_window(move |_, window, cx| {
-                        let _ = owner.update(cx, |this, _| this.native.shutdown());
+                        let _ = owner.update(cx, |this, _| {
+                            this.studio = None;
+                            this.native.shutdown()
+                        });
                         window.remove_window();
                     })
                     .bg(ink(SURFACE))

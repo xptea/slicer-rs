@@ -355,6 +355,9 @@ EOF
     mkdir -p -- "$DEB_ROOT/DEBIAN"
 fi
 DEB_DEPENDS=${DEB_DEPENDS:-libc6}
+if readelf -d "$BINARY_PATH" | grep -q 'libavcodec.so.62'; then
+    DEB_DEPENDS="$DEB_DEPENDS, libavcodec62, libavformat62, libavutil60, libswscale9, libswresample6, libpulse0, libegl1, libgl1, libx11-6"
+fi
 
 INSTALLED_SIZE=$(du -sk -- "$DEB_ROOT" | awk '{print $1}')
 cat >"$DEB_ROOT/DEBIAN/control" <<EOF

@@ -273,6 +273,18 @@ copy_application_sources() {
         -o -type f -print0 | sort -z)
 }
 
+# The multitrack engine links FFmpeg 8 libraries in addition to the legacy tool bundle.
+# A release must supply the corresponding library closure and source/license materials.
+if readelf -d "$BINARY_PATH" | grep -q 'libavcodec.so.62'; then
+    ENGINE_BUNDLE=${SLICER_ENGINE_BUNDLE:-$ROOT_DIR/build/engine/$TARGET}
+    for required in lib/libavcodec.so.62 lib/libavformat.so.62 lib/libavutil.so.60 lib/libswscale.so.9 lib/libswresample.so.6 ENGINE-NOTICE.txt; do
+        [[ -f "$ENGINE_BUNDLE/$required" ]] || { printf 'error: multitrack runtime bundle is missing %s; set SLICER_ENGINE_BUNDLE (see docs/multitrack.md)\n' "$required" >&2; exit 1; }
+    done
+    [[ -d "$ENGINE_BUNDLE/source" ]] || { printf 'error: engine bundle requires corresponding source materials\n' >&2; exit 1; }
+    cp -a "$ENGINE_BUNDLE/lib/." "$PACKAGE_DIR/lib/"
+    mkdir -p "$PACKAGE_DIR/share/slicer/engine"
+    cp -a "$ENGINE_BUNDLE/ENGINE-NOTICE.txt" "$ENGINE_BUNDLE/source" "$PACKAGE_DIR/share/slicer/engine/"
+fi
 install -m 755 "$BINARY_PATH" "$PACKAGE_DIR/bin/slicer"
 install -m 644 "$ROOT_DIR/resources/slicer.desktop" \
     "$PACKAGE_DIR/share/applications/slicer.desktop"

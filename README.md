@@ -4,6 +4,21 @@ Native Linux video trimming toolbox built with GPUI Kit. FFmpeg and ffprobe ship
 beside the application; installed builds never search `PATH` for media tools.
 The 800 × 720 Home window has a full dashed drop area with a centered open button and up to three recent-video thumbnails.
 
+## Multitrack workspace (development)
+
+Open the development workspace with `cargo run --locked -- studio`, or pass a
+`.slicer` project after `studio`. The original single-file trimmer is unchanged.
+
+Multitrack video now uses persistent **libmpv render sessions and one OpenGL
+canvas**, with images uploaded once. Preview and MP4 export share that compositor;
+there is no WGPU video compositor or OpenGL-to-WGPU texture bridge. WGPU remains
+in GPUI's existing interface renderer.
+
+The workspace includes video/image/audio tracks, trims, canvas transforms,
+undo/redo, project save/autosave, and MP4 export. This implementation is Linux/X11
+only. FFmpeg 8 libraries are still required for media inspection, audio mixing,
+and encoding. See [architecture, setup, and validation](docs/multitrack.md).
+
 ## Run the Linux build
 
 Extract `dist/slicer-linux-x86_64-native.tar.gz`, keep the whole folder together, and run
