@@ -106,6 +106,30 @@ impl Waveform {
         self.has_audio
     }
 
+    /// Merge peaks in a source-time interval, including trimmed clip offsets.
+    pub fn peak_between(&self, start: f64, end: f64) -> Peak {
+        if !start.is_finite()
+            || !end.is_finite()
+            || self.duration <= 0.0
+            || end <= start
+            || end <= 0.0
+            || start >= self.duration
+        {
+            return Peak::silence();
+        }
+        let first = ((start.max(0.0) / self.duration * self.peaks.len() as f64).floor() as usize)
+            .min(self.peaks.len());
+        let last = ((end.min(self.duration) / self.duration * self.peaks.len() as f64).ceil()
+            as usize)
+            .min(self.peaks.len());
+        self.peaks[first..last]
+            .iter()
+            .fold(Peak::silence(), |peak, source| Peak {
+                min: peak.min.min(source.min),
+                max: peak.max.max(source.max),
+            })
+    }
+
     /// Merge the source bins that cover one rendered timeline column.
     pub fn peak_for_column(&self, column: usize, columns: usize) -> Peak {
         if self.peaks.is_empty() || columns == 0 {
@@ -567,6 +591,37 @@ fn skip_bytes<R: Read>(reader: &mut R, mut count: u64) -> Result<(), String> {
 mod tests {
     use super::*;
     use std::io::Cursor;
+
+    #[test]
+    fn source_time_ranges_do_not_show_audio_outside_the_clip() {
+        let wave = Waveform::from_peaks(
+            4.,
+            vec![
+                Peak {
+                    min: -0.1,
+                    max: 0.1,
+                },
+                Peak {
+                    min: -0.2,
+                    max: 0.2,
+                },
+                Peak {
+                    min: -0.8,
+                    max: 0.8,
+                },
+                Peak {
+                    min: -0.4,
+                    max: 0.4,
+                },
+            ],
+            true,
+        );
+        assert_eq!(wave.peak_between(2., 3.).max, 0.8);
+        assert_eq!(wave.peak_between(1.5, 2.5).max, 0.8);
+        assert_eq!(wave.peak_between(0., 1.).max, 0.1);
+        assert_eq!(wave.peak_between(4., 5.), Peak::silence());
+        assert_eq!(wave.peak_between(-2., -1.), Peak::silence());
+    }
 
     fn wav(samples: &[i16], sample_rate: u32) -> Vec<u8> {
         let data_len = samples.len() as u32 * 2;

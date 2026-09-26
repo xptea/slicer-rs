@@ -59,6 +59,9 @@ fn project(path: &Path) -> Project {
         still: false,
         transform: Transform::default(),
         gain: 0.5,
+        graphic: None,
+        fade_in: 0,
+        fade_out: 0,
     };
     p.tracks[0].clips.push(c.clone());
     let mut overlay = c;
@@ -632,4 +635,111 @@ fn releasing_at_completed_drag_target_reuses_exact_frame() {
     );
     assert_eq!(released.seeks, before.seeks);
     assert_eq!(pixels, r.read_pixels([320, 180]));
+}
+
+#[test]
+#[ignore = "Requires X11/EGL, libmpv and FFmpeg tools"]
+fn cached_scrubbing_avoids_player_seeks_and_release_restores_originals() {
+    use slicer::engine::gl_canvas::Renderer;
+    let dir = tempfile::tempdir().unwrap();
+    let path = fixture(dir.path());
+    let p = project(&path);
+    let mut r = Renderer::new(0, 320, 180).unwrap();
+    r.enable_scrub_cache();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let initial = loop {
+        let s = r.render(&p, 0, 0, false, [320, 180], None).unwrap();
+        if s.ready {
+            break s;
+        }
+        assert!(Instant::now() < deadline, "{s:?}");
+        std::thread::sleep(Duration::from_millis(1));
+    };
+    r.set_scrubbing(true);
+    for (i, time) in [600_000, 100_000, 450_000, 900_000, 350_000]
+        .into_iter()
+        .enumerate()
+    {
+        loop {
+            let s = r
+                .render(&p, time, i as u64 + 1, false, [320, 180], None)
+                .unwrap();
+            assert_eq!(s.seeks, initial.seeks, "scrub cache must not seek libmpv");
+            if s.ready {
+                assert_eq!(s.positions.len(), 2);
+                break;
+            }
+            assert!(Instant::now() < deadline, "{s:?}");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+    // An empty project must clear the canvas instead of reusing a cached scene.
+    let gap = r
+        .render(&Project::default(), 0, 90, false, [320, 180], None)
+        .unwrap();
+    assert!(gap.ready);
+    assert!(
+        r.read_pixels([320, 180])
+            .chunks_exact(4)
+            .all(|p| p[..3] == [0, 0, 0])
+    );
+    r.set_scrubbing(false);
+    loop {
+        let s = r.render(&p, 350_000, 100, false, [320, 180], None).unwrap();
+        if s.ready {
+            for (id, position, seeking, _) in &s.positions {
+                let target = if *id == 1 { 0.35 } else { 0.65 };
+                assert!(!seeking);
+                assert!((position - target).abs() < 0.04, "{s:?}");
+            }
+            assert_eq!(s.seeks, initial.seeks + 2);
+            break;
+        }
+        assert!(Instant::now() < deadline, "{s:?}");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+#[ignore = "Requires X11/EGL and libmpv"]
+fn image_collage_stays_resident_across_its_end_boundary() {
+    use slicer::engine::gl_canvas::Renderer;
+    let dir = tempfile::tempdir().unwrap();
+    let mut p = Project::default();
+    for i in 0..16 {
+        let path = dir.path().join(format!("{i}.png"));
+        image::RgbaImage::from_pixel(64, 64, image::Rgba([i as u8 * 12, 80, 100, 255]))
+            .save(&path)
+            .unwrap();
+        p.tracks[0].clips.push(Clip {
+            id: i + 1,
+            path,
+            start: 0,
+            source_in: 0,
+            duration: SECOND,
+            source_duration: SECOND,
+            visual: true,
+            audio: false,
+            still: true,
+            transform: Transform::default(),
+            gain: 1.,
+            graphic: None,
+            fade_in: 0,
+            fade_out: 0,
+        });
+    }
+    let mut r = Renderer::new(0, 320, 180).unwrap();
+    r.set_scrubbing(true);
+    let first = r.render(&p, 0, 1, false, [320, 180], None).unwrap();
+    let pixels = r.read_pixels([320, 180]);
+    for i in 0..10 {
+        r.render(&p, SECOND, 2 + i * 2, false, [320, 180], None)
+            .unwrap();
+        let returned = r.render(&p, 0, 3 + i * 2, false, [320, 180], None).unwrap();
+        assert_eq!(
+            returned.opens, first.opens,
+            "cached images were decoded again"
+        );
+        assert_eq!(pixels, r.read_pixels([320, 180]));
+    }
 }

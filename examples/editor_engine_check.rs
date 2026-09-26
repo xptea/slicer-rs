@@ -29,6 +29,9 @@ fn main() -> anyhow::Result<()> {
             still: false,
             transform: Transform::default(),
             gain: 1.,
+            graphic: None,
+            fade_in: 0,
+            fade_out: 0,
         });
     }
     let mut canvas = Renderer::new(0, 1920, 1080)?;

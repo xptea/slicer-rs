@@ -328,6 +328,7 @@ struct SeekRequest {
 /// seek/control replies avoid clobbering a newer request.
 #[derive(Clone, Copy)]
 enum PendingCommand {
+    Step,
     Speed,
     Load,
     Seek(SeekRequest),
@@ -477,6 +478,7 @@ fn nonzero_f64(value: u64) -> Option<f64> {
 }
 
 enum WorkerCommand {
+    Step(u32),
     Load {
         path: CString,
         start: f64,
@@ -724,6 +726,14 @@ impl NativePlayer {
         }
         self.state.seeking.store(true, Ordering::Release);
         self.wake()
+    }
+
+    /// Sequential offline preview extraction must not restart a long GOP for
+    /// every frame. Keep decoding forward, then pause at the requested frame.
+    pub(crate) fn step_preview(&self, frames: u32) -> Result<(), String> {
+        self.try_send(WorkerCommand::Step(frames))?;
+        self.shared.wake_mpv();
+        Ok(())
     }
 
     /// Read the current state without waiting on libmpv.
@@ -1102,6 +1112,14 @@ impl PlayerWorker {
     fn drain_commands(&mut self, receiver: &Receiver<WorkerCommand>) {
         loop {
             match receiver.try_recv() {
+                Ok(WorkerCommand::Step(frames)) => {
+                    if let Err(error) = self.command_async(
+                        &["frame-step", &frames.to_string(), "play"],
+                        PendingCommand::Step,
+                    ) {
+                        self.state.set_error(error);
+                    }
+                }
                 Ok(WorkerCommand::Load { path, start, end }) => self.load_file(path, start, end),
                 Ok(WorkerCommand::Shutdown) => {
                     self.shared.shutdown.store(true, Ordering::Release);
@@ -1451,6 +1469,9 @@ impl PlayerWorker {
 
         let error = unsafe { self.api.error(event_error) };
         match command {
+            PendingCommand::Step => self
+                .state
+                .set_error(format!("Preview frame step failed: {error}")),
             PendingCommand::Speed => self
                 .state
                 .set_error(format!("Video clock correction failed: {error}")),

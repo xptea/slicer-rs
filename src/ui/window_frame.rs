@@ -4,13 +4,15 @@ use super::*;
 
 pub(super) fn frame(
     content: impl IntoElement,
+    mut tools: Option<AnyElement>,
     window: &mut Window,
     cx: &mut Context<SlicerApp>,
 ) -> AnyElement {
     let owner = cx.entity().downgrade();
+    let studio = tools.is_some();
     let client = matches!(window.window_decorations(), Decorations::Client { .. });
     let maximized = window.is_maximized() || window.is_fullscreen();
-    let radius = if maximized { px(0.) } else { px(18.) };
+    let radius = if maximized { px(0.) } else { px(WINDOW_RADIUS) };
     let inset = if client && !maximized { px(6.) } else { px(0.) };
     // TitleBar lays out its custom children in a flex region that ends before
     // the platform control buttons. Position the title over the full bar and
@@ -51,7 +53,8 @@ pub(super) fn frame(
                         });
                         window.remove_window();
                     })
-                    .bg(ink(SURFACE))
+                    .bg(ink(if studio { BG } else { SURFACE }))
+                    .when(studio, |bar| bar.border_b_0())
                     .rounded_t(radius)
                     .child(
                         div()
@@ -65,8 +68,12 @@ pub(super) fn frame(
                             .justify_center()
                             .text_sm()
                             .child("Slicer"),
-                    ),
+                    )
+                    .when_some(tools.take(), |bar, tools| bar.child(tools)),
             )
+        })
+        .when_some(tools, |surface, tools| {
+            surface.child(div().h(px(32.)).px_2().child(tools))
         })
         .child(
             div()

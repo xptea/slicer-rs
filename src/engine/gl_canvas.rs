@@ -1,6 +1,11 @@
 //! libmpv controls run on their existing workers; this owner only calls the render API.
 //! The compositor and all OpenGL resources stay on one thread, including destruction.
-use super::project::{Project, Time, Transform};
+use super::graphics::Graphics;
+use super::project::{Clip, Graphic, Project, Time, Transform};
+use super::{
+    decoder::Frame,
+    scrub::{ScrubCache, Target},
+};
 use crate::native_player::NativePlayer;
 use anyhow::{Result, bail};
 use std::{
@@ -36,6 +41,7 @@ unsafe extern "C" {
     fn slicer_gl_read(c: *mut c_void, pixels: *mut u8);
 }
 struct Source {
+    graphic: Option<(Graphic, u32, u32, u32)>,
     raw: *mut c_void,
     player: Option<NativePlayer>,
     path: PathBuf,
@@ -47,14 +53,24 @@ struct Source {
     playing: bool,
     require_target: bool,
     frame_size: [i32; 2],
+    image_bytes: usize,
+}
+struct ScrubTexture {
+    raw: *mut c_void,
+    frame: Arc<Frame>,
+    path: PathBuf,
+    used: u64,
 }
 pub struct Renderer {
+    graphics: Option<Graphics>,
     raw: *mut c_void,
     sources: HashMap<u64, Source>,
     epoch: u64,
     seeks: u64,
     opens: u64,
     scrubbing: bool,
+    scrub_cache: Option<ScrubCache>,
+    scrub_textures: HashMap<u64, ScrubTexture>,
     dirty: bool,
     last_layout: Option<(Vec<(u64, Transform)>, [u32; 2], Option<u64>)>,
     // Raw EGL contexts cannot move between threads.
@@ -71,6 +87,7 @@ pub struct Diagnostics {
     pub error: Option<String>,
     pub decoders: Vec<String>,
     pub positions: Vec<(u64, f64, bool, bool)>,
+    pub scrub_status: String,
 }
 impl Renderer {
     pub fn new(window: u64, width: u32, height: u32) -> Result<Self> {
@@ -98,6 +115,7 @@ impl Renderer {
             );
         }
         Ok(Self {
+            graphics: None,
             raw,
             sources: HashMap::new(),
             epoch: 0,
@@ -105,6 +123,8 @@ impl Renderer {
             opens: 0,
             last_layout: None,
             scrubbing: false,
+            scrub_cache: None,
+            scrub_textures: HashMap::new(),
             dirty: true,
             _thread: Default::default(),
         })
@@ -115,14 +135,25 @@ impl Renderer {
             drop(source);
         }
     }
-    fn source(
-        &mut self,
-        id: u64,
-        path: &std::path::Path,
-        still: bool,
-        initial_time: Time,
-    ) -> Result<()> {
-        if self.sources.get(&id).is_some_and(|s| s.path == path) {
+    fn source(&mut self, clip: &Clip, project: &Project, initial_time: Time) -> Result<()> {
+        let (id, path, still) = (clip.id, &clip.path, clip.still);
+        let graphic = clip.graphic.as_ref().map(|g| {
+            (
+                g.clone(),
+                (project.width as f32 * clip.transform.width)
+                    .ceil()
+                    .clamp(1., 4096.) as u32,
+                (project.height as f32 * clip.transform.height)
+                    .ceil()
+                    .clamp(1., 4096.) as u32,
+                project.height,
+            )
+        });
+        if self
+            .sources
+            .get(&id)
+            .is_some_and(|s| s.path == *path && s.graphic == graphic)
+        {
             return Ok(());
         }
         self.remove(id);
@@ -132,11 +163,19 @@ impl Renderer {
             Some(NativePlayer::new_for_render().map_err(anyhow::Error::msg)?)
         };
         // Decode images before allocating the GL object, so failures cannot leak resources.
-        let image = if still {
+        let image = if let Some((graphic, w, h, project_height)) = &graphic {
+            Some(self.graphics.get_or_insert_with(Graphics::default).render(
+                graphic,
+                *w,
+                *h,
+                *project_height,
+            ))
+        } else if still {
             Some(image::open(path)?.into_rgba8())
         } else {
             None
         };
+        let image_bytes = image.as_ref().map_or(0, |i| i.as_raw().len());
         let mut error = [0i8; 512];
         let raw = unsafe {
             slicer_gl_source(
@@ -174,6 +213,7 @@ impl Renderer {
         self.sources.insert(
             id,
             Source {
+                graphic,
                 raw,
                 player,
                 path: path.into(),
@@ -185,8 +225,10 @@ impl Renderer {
                 playing: false,
                 require_target: true,
                 frame_size: [1, 1],
+                image_bytes,
             },
         );
+        self.dirty = true;
         Ok(())
     }
     /// Prepare at most one missing neighboring clip per idle pass. Existing
@@ -227,7 +269,7 @@ impl Renderer {
             } else {
                 clip.source_in
             };
-            self.source(clip.id, &clip.path, clip.still, source_time)?;
+            self.source(clip, project, source_time)?;
             let s = self.sources.get_mut(&clip.id).unwrap();
             s.used = self.epoch.saturating_sub(1);
             s.frame_size = [
@@ -242,7 +284,46 @@ impl Renderer {
         Ok(())
     }
     pub fn set_scrubbing(&mut self, scrubbing: bool) {
+        self.dirty |= self.scrubbing != scrubbing;
         self.scrubbing = scrubbing;
+    }
+    /// Export renderers never enable the approximation/cache path.
+    pub fn enable_scrub_cache(&mut self) {
+        self.scrub_cache.get_or_insert_with(ScrubCache::new);
+    }
+
+    /// Used only by the offline HDR proxy worker, never by timeline playback.
+    pub(super) fn step_preview(&mut self, time: Time) -> Result<()> {
+        if let Some(source) = self.sources.get_mut(&1) {
+            if let Some(player) = &source.player {
+                let snapshot = player.snapshot();
+                let fps = snapshot.estimated_vf_fps.unwrap_or(30.);
+                let delta = time as f64 / 1e6 - snapshot.position;
+                let frames = (delta * fps).round();
+                if snapshot.loaded && !snapshot.seeking && frames >= 1. && frames <= 4. {
+                    player
+                        .step_preview(frames as u32)
+                        .map_err(anyhow::Error::msg)?;
+                    source.generation = time as u64;
+                    source.target = time;
+                    source.rendered = false;
+                    source.require_target = true;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn preview_at_target(&self, time: Time) -> bool {
+        self.sources
+            .get(&1)
+            .and_then(|s| s.player.as_ref())
+            .is_some_and(|p| {
+                let snapshot = p.snapshot();
+                snapshot.paused
+                    && (snapshot.position - time as f64 / 1e6).abs()
+                        <= 0.51 / snapshot.estimated_vf_fps.unwrap_or(30.)
+            })
     }
     /// Render a requested project time. Playing sessions advance normally; scrubs use coalesced seeks.
     pub fn render(
@@ -256,17 +337,110 @@ impl Renderer {
     ) -> Result<Diagnostics> {
         self.epoch += 1;
         let mut layers = vec![];
+        let mut draw_sources = HashMap::new();
         let mut changed_pixels = false;
         let mut status = Diagnostics {
             generation,
             ready: true,
             ..Default::default()
         };
+        if let Some(cache) = &self.scrub_cache {
+            let mut sources: Vec<_> = project
+                .media
+                .iter()
+                .chain(project.tracks.iter().flat_map(|t| &t.clips))
+                .filter(|c| c.visual && !c.still)
+                .map(|c| c.path.clone())
+                .collect();
+            sources.sort();
+            sources.dedup();
+            cache.prepare(sources);
+            cache.request(if playing {
+                vec![]
+            } else {
+                project
+                    .active(time)
+                    .filter(|(t, c, _)| !t.hidden && c.visual && !c.still)
+                    .map(|(_, c, time)| Target {
+                        path: c.path.clone(),
+                        time,
+                    })
+                    .collect()
+            });
+            status.scrub_status = cache.status();
+        }
         for (track, clip, source_time) in project.active(time) {
             if track.hidden || !clip.visual {
                 continue;
             }
-            self.source(clip.id, &clip.path, clip.still, source_time)?;
+            if self.scrubbing {
+                if let Some(cache) = &self.scrub_cache {
+                    if !clip.still && !cache.failed(&clip.path) {
+                        if let Some(frame) = cache.frame(&clip.path, source_time) {
+                            let mut error = [0i8; 512];
+                            if !self.scrub_textures.contains_key(&clip.id) {
+                                let raw = unsafe {
+                                    slicer_gl_source(
+                                        self.raw,
+                                        std::ptr::null_mut(),
+                                        error.as_mut_ptr(),
+                                        512,
+                                    )
+                                };
+                                if raw.is_null() {
+                                    bail!("Cannot allocate scrub texture");
+                                }
+                                unsafe {
+                                    slicer_gl_image(
+                                        raw,
+                                        frame.width as i32,
+                                        frame.height as i32,
+                                        frame.pixels.as_ptr(),
+                                    )
+                                };
+                                self.scrub_textures.insert(
+                                    clip.id,
+                                    ScrubTexture {
+                                        raw,
+                                        frame: frame.clone(),
+                                        path: clip.path.clone(),
+                                        used: self.epoch,
+                                    },
+                                );
+                                changed_pixels = true;
+                            }
+                            let texture = self.scrub_textures.get_mut(&clip.id).unwrap();
+                            if !Arc::ptr_eq(&texture.frame, &frame) || texture.path != clip.path {
+                                unsafe {
+                                    slicer_gl_image(
+                                        texture.raw,
+                                        frame.width as i32,
+                                        frame.height as i32,
+                                        frame.pixels.as_ptr(),
+                                    )
+                                };
+                                texture.frame = frame.clone();
+                                texture.path = clip.path.clone();
+                                changed_pixels = true;
+                            }
+                            texture.used = self.epoch;
+                            draw_sources.insert(clip.id, texture.raw);
+                            let mut transform = clip.transform.clone();
+                            transform.opacity *= clip.fade(time);
+                            layers.push((clip.id, transform));
+                            status.ready &= source_time >= frame.pts
+                                && source_time < frame.pts + frame.duration;
+                            status
+                                .positions
+                                .push((clip.id, frame.pts as f64 / 1e6, false, true));
+                        } else {
+                            status.ready = false;
+                        }
+                        continue;
+                    }
+                }
+            }
+            self.source(clip, project, source_time)?;
             let s = self.sources.get_mut(&clip.id).unwrap();
             s.used = self.epoch;
             if let Some(p) = &s.player {
@@ -339,7 +513,22 @@ impl Renderer {
                     snapshot.hwdec.unwrap_or("software".into())
                 ));
             }
-            layers.push((clip.id, clip.transform.clone()));
+            draw_sources.insert(clip.id, s.raw);
+            let mut transform = clip.transform.clone();
+            transform.opacity *= clip.fade(time);
+            layers.push((clip.id, transform));
+        }
+        // Textures are cheap to re-upload from the bounded CPU cache. Retain
+        // only this scene so cuts cannot grow GPU memory or expose stale clips.
+        let unused: Vec<_> = self
+            .scrub_textures
+            .iter()
+            .filter(|(_, s)| s.used != self.epoch)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in unused {
+            let texture = self.scrub_textures.remove(&id).unwrap();
+            unsafe { slicer_gl_source_free(self.raw, texture.raw) };
         }
         for source in self.sources.values_mut() {
             if source.used != self.epoch {
@@ -374,8 +563,23 @@ impl Renderer {
             .map(|(id, s)| (*id, s.used))
             .collect();
         inactive.sort_by_key(|(_, used)| std::cmp::Reverse(*used));
-        for (id, _) in inactive.into_iter().skip(4) {
-            self.remove(id);
+        let mut videos = 0;
+        let mut image_bytes = 0;
+        for (id, _) in inactive {
+            let source = &self.sources[&id];
+            let evict = if source.player.is_some() {
+                videos += 1;
+                videos > 4
+            } else {
+                // Image textures do not own decoder/GPU player sessions. A
+                // four-source limit repeatedly decoded entire image collages
+                // when scrubbing back over their shared boundary.
+                image_bytes += source.image_bytes;
+                image_bytes > 256 * 1024 * 1024
+            };
+            if evict {
+                self.remove(id);
+            }
         }
         let layout = (layers.clone(), size, selected);
         status.seeks = self.seeks;
@@ -383,7 +587,7 @@ impl Renderer {
         self.dirty |= changed_pixels || self.last_layout.as_ref() != Some(&layout);
         // Paused seeks publish only a coherent set of source frames. Keep the last
         // completed canvas visible while any source is still seeking.
-        if !status.ready || !self.dirty {
+        if (!status.ready && !(self.scrubbing && self.scrub_cache.is_some())) || !self.dirty {
             return Ok(status);
         }
         self.dirty = false;
@@ -397,7 +601,7 @@ impl Renderer {
             unsafe {
                 slicer_gl_draw(
                     self.raw,
-                    self.sources[&id].raw,
+                    draw_sources[&id],
                     params.as_ptr(),
                     (selected == Some(id)) as i32,
                 )
@@ -440,6 +644,10 @@ fn transform(t: &Transform) -> [f32; 6] {
 }
 impl Drop for Renderer {
     fn drop(&mut self) {
+        self.scrub_cache.take();
+        for (_, texture) in self.scrub_textures.drain() {
+            unsafe { slicer_gl_source_free(self.raw, texture.raw) };
+        }
         let ids: Vec<_> = self.sources.keys().copied().collect();
         for id in ids {
             self.remove(id);
@@ -478,14 +686,6 @@ impl Request {
                     .map(|(_, c, _)| c.id))
     }
 
-    fn retain_sample(&self, latest: &Self, completed: bool, elapsed: Duration) -> bool {
-        self.scrubbing
-            && latest.scrubbing
-            && !completed
-            && elapsed < Duration::from_millis(250)
-            && self.same_scene(latest)
-    }
-
     fn can_publish_for(&self, latest: &Self) -> bool {
         self.revision == latest.revision
             || (self.scrubbing && latest.scrubbing && self.same_scene(latest))
@@ -514,10 +714,9 @@ impl Preview {
         let worker = std::thread::spawn(move || {
             let result = (|| -> Result<()> {
                 let mut renderer = Renderer::new(window, 1, 1)?;
+                renderer.enable_scrub_cache();
                 let mut frames = 0;
                 let mut previous = 0;
-                let mut in_flight: Option<(Request, Instant)> = None;
-                let mut completed = true;
                 loop {
                     let request = {
                         let (lock, wake) = &*state;
@@ -530,17 +729,6 @@ impl Preview {
                         }
                         s.request.clone().unwrap()
                     };
-                    let request = if let Some((active, began)) = &in_flight {
-                        if active.retain_sample(&request, completed, began.elapsed()) {
-                            active.clone()
-                        } else {
-                            in_flight = Some((request.clone(), Instant::now()));
-                            request
-                        }
-                    } else {
-                        in_flight = Some((request.clone(), Instant::now()));
-                        request
-                    };
                     renderer.set_scrubbing(request.scrubbing);
                     let mut status = renderer.render(
                         &request.project,
@@ -550,9 +738,9 @@ impl Preview {
                         request.size,
                         request.selected,
                     )?;
-                    completed = status.ready;
-                    // During a drag, publish completed coherent samples while retaining
-                    // just the newest pending target. A release supersedes old samples.
+                    let completed = status.ready;
+                    // Drag requests always consume the latest target. Cached layers
+                    // may update independently; release restores precise composition.
                     // Do not display an obsolete seek result if the UI replaced it during rendering.
                     let current = state
                         .0
@@ -697,6 +885,9 @@ mod scheduler_tests {
                 still,
                 transform: Transform::default(),
                 gain: 1.,
+                graphic: None,
+                fade_in: 0,
+                fade_out: 0,
             });
             track
         })
@@ -719,20 +910,16 @@ mod scheduler_tests {
             let before = request(boundary - 1);
             let after = request(boundary);
             for (old, latest) in [(&before, &after), (&after, &before)] {
-                assert!(!old.retain_sample(latest, false, Duration::from_millis(1)));
                 assert!(!old.can_publish_for(latest));
             }
         }
     }
 
     #[test]
-    fn same_scene_coalesces_but_release_and_project_edits_supersede_it() {
+    fn completed_samples_may_publish_only_for_the_same_drag_scene() {
         let old = request(2_000_000);
         let mut latest = request(2_100_000);
-        assert!(old.retain_sample(&latest, false, Duration::from_millis(1)));
         assert!(old.can_publish_for(&latest));
-        assert!(!old.retain_sample(&latest, true, Duration::from_millis(1)));
-        assert!(!old.retain_sample(&latest, false, Duration::from_millis(250)));
         latest.scrubbing = false;
         assert!(!old.can_publish_for(&latest));
         latest.scrubbing = true;

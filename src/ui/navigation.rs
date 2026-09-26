@@ -4,6 +4,9 @@ use super::*;
 
 impl SlicerApp {
     pub(super) fn header(&self, cx: &mut Context<Self>) -> AnyElement {
+        if self.screen == Screen::Studio {
+            return div().into_any_element();
+        }
         let home = Button::new("nav-home")
             .ghost()
             .compact()
@@ -13,16 +16,16 @@ impl SlicerApp {
             } else {
                 "Home"
             })
-            .child(
-                div()
-                    .text_size(px(16.))
-                    .child(if self.screen == Screen::Editor {
-                        "Back"
-                    } else {
-                        "Home"
-                    }),
-            )
-            .px_3()
+            .icon(if self.screen == Screen::Editor {
+                gpui_kit::assets::IconName::ArrowLeft
+            } else {
+                gpui_kit::assets::IconName::House
+            })
+            .tooltip(if self.screen == Screen::Editor {
+                "Back"
+            } else {
+                "Home"
+            })
             .selected(self.screen == Screen::Home)
             .disabled(self.export_job.is_some())
             .on_click(cx.listener(|this, _, _, _| this.show_home()));
@@ -31,8 +34,8 @@ impl SlicerApp {
             .compact()
             .rounded(px(10.))
             .accessibility_label("Settings")
-            .child(div().text_size(px(16.)).child("Settings"))
-            .px_3()
+            .icon(gpui_kit::assets::IconName::Settings)
+            .tooltip("Settings")
             .selected(self.screen == Screen::Settings)
             .disabled(self.export_job.is_some())
             .on_click(cx.listener(|this, _, _, _| {
@@ -44,7 +47,11 @@ impl SlicerApp {
             }));
         h_flex()
             .w_full()
-            .h(px(56.))
+            .h(px(if self.screen == Screen::Studio {
+                36.
+            } else {
+                56.
+            }))
             .flex_shrink_0()
             .px(px(CONTENT_GUTTER))
             .gap_2()

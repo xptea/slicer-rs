@@ -14,8 +14,17 @@ canvas**, with images uploaded once. Preview and MP4 export share that composito
 there is no WGPU video compositor or OpenGL-to-WGPU texture bridge. WGPU remains
 in GPUI's existing interface renderer.
 
-The workspace includes video/image/audio tracks, trims, canvas transforms,
-undo/redo, project save/autosave, and MP4 export. This implementation is Linux/X11
+Dragging uses cached frames and automatically prepared, low-resolution scrub
+proxies. Releasing returns to a precise frame from the original video; originals
+remain the export source.
+
+The workspace includes video/image/audio tracks, editable text, color backgrounds,
+fades, trims, canvas transforms, multiselection, clipboard editing, undo/redo,
+project save/autosave, and MP4 export. Use **T** for text, **Ctrl+wheel** to zoom
+at the pointer, the wheel or middle drag to pan, and **Shift+wheel** to scroll
+tracks. The keyboard icon opens the shortcut guide. **Canvas** in Properties
+sets the output aspect ratio, dimensions, and frame rate; the outlined black
+frame shows exactly what will be exported. This implementation is Linux/X11
 only. FFmpeg 8 libraries are still required for media inspection, audio mixing,
 and encoding. See [architecture, setup, and validation](docs/multitrack.md).
 

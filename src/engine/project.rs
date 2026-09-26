@@ -28,6 +28,37 @@ impl Default for Transform {
     }
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct TextStyle {
+    pub text: String,
+    pub font: String,
+    pub size: f32,
+    pub bold: bool,
+    pub italic: bool,
+    pub align: u8,
+    pub color: [u8; 4],
+    pub background: [u8; 4],
+}
+impl Default for TextStyle {
+    fn default() -> Self {
+        Self {
+            text: "Your text".into(),
+            font: "Sans".into(),
+            size: 72.,
+            bold: false,
+            italic: false,
+            align: 1,
+            color: [255; 4],
+            background: [0; 4],
+        }
+    }
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type")]
+pub enum Graphic {
+    Text(TextStyle),
+    Color { color: [u8; 4] },
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Clip {
     pub id: u64,
     pub path: PathBuf,
@@ -40,8 +71,49 @@ pub struct Clip {
     pub still: bool,
     pub transform: Transform,
     pub gain: f32,
+    #[serde(default)]
+    pub graphic: Option<Graphic>,
+    #[serde(default)]
+    pub fade_in: Time,
+    #[serde(default)]
+    pub fade_out: Time,
 }
 impl Clip {
+    pub fn label(&self) -> String {
+        match &self.graphic {
+            Some(Graphic::Text(text)) => text
+                .text
+                .lines()
+                .next()
+                .filter(|s| !s.is_empty())
+                .unwrap_or("Text")
+                .chars()
+                .take(80)
+                .collect(),
+            Some(Graphic::Color { .. }) => "Color background".into(),
+            None => self
+                .path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into(),
+        }
+    }
+    pub fn fade(&self, time: Time) -> f32 {
+        let elapsed = (time - self.start).max(0) as f32;
+        let remaining = (self.end() - time).max(0) as f32;
+        let fade_in = if self.fade_in > 0 {
+            (elapsed / self.fade_in as f32).min(1.)
+        } else {
+            1.
+        };
+        let fade_out = if self.fade_out > 0 {
+            (remaining / self.fade_out as f32).min(1.)
+        } else {
+            1.
+        };
+        fade_in.min(fade_out)
+    }
     pub fn end(&self) -> Time {
         self.start.saturating_add(self.duration)
     }
@@ -71,6 +143,8 @@ pub struct Project {
     pub fps_num: u32,
     pub fps_den: u32,
     pub tracks: Vec<Track>,
+    #[serde(default)]
+    pub media: Vec<Clip>,
     pub next_id: u64,
 }
 impl Default for Project {
@@ -86,6 +160,7 @@ impl Default for Project {
                 Track::new("Video 2"),
                 Track::new("Audio"),
             ],
+            media: Vec::new(),
             next_id: 1,
         }
     }
@@ -102,6 +177,120 @@ impl Track {
     }
 }
 impl Project {
+    pub fn add_graphic(&mut self, graphic: Graphic, start: Time) -> u64 {
+        let text = matches!(&graphic, Graphic::Text(_));
+        let name = if text { "Text" } else { "Background" };
+        let mut track = Track::new(name);
+        let id = self.next_id;
+        self.next_id += 1;
+        track.clips.push(Clip {
+            id,
+            path: PathBuf::new(),
+            start: start.max(0),
+            source_in: 0,
+            duration: 5 * SECOND,
+            source_duration: 5 * SECOND,
+            visual: true,
+            audio: false,
+            still: true,
+            transform: if text {
+                Transform {
+                    width: 0.8,
+                    height: 0.3,
+                    ..Transform::default()
+                }
+            } else {
+                Transform::default()
+            },
+            gain: 1.,
+            graphic: Some(graphic),
+            fade_in: 0,
+            fade_out: 0,
+        });
+        if text {
+            self.tracks.push(track);
+        } else {
+            self.tracks.insert(0, track);
+        }
+        id
+    }
+    pub fn resize_canvas(&mut self, width: u32, height: u32) -> Result<()> {
+        if width < 2
+            || height < 2
+            || width > 8192
+            || height > 8192
+            || width % 2 != 0
+            || height % 2 != 0
+        {
+            bail!("Use even dimensions between 2 and 8192 pixels");
+        }
+        let ratio = (self.width as f32 / self.height as f32) / (width as f32 / height as f32);
+        for c in self.tracks.iter_mut().flat_map(|t| &mut t.clips) {
+            c.transform.x = 0.5 + (c.transform.x - 0.5) * ratio;
+            c.transform.width *= ratio;
+            if matches!(c.graphic, Some(Graphic::Color { .. })) {
+                c.transform = Transform::default();
+            }
+        }
+        self.width = width;
+        self.height = height;
+        Ok(())
+    }
+    /// Media in the bin is independent of timeline instances.
+    pub fn add_media(&mut self, mut clip: Clip) {
+        if clip.graphic.is_some() {
+            return;
+        }
+        if self.media.iter().any(|asset| asset.path == clip.path) {
+            return;
+        }
+        clip.id = 0;
+        clip.start = 0;
+        clip.source_in = 0;
+        if !clip.still {
+            clip.duration = clip.source_duration;
+        }
+        // Bin items describe the original source, not one edited instance.
+        let scale = clip.transform.width.max(clip.transform.height).max(0.01);
+        clip.transform.width /= scale;
+        clip.transform.height /= scale;
+        clip.transform.x = 0.5;
+        clip.transform.y = 0.5;
+        clip.transform.rotation = 0.;
+        clip.transform.opacity = 1.;
+        clip.gain = 1.;
+        self.media.push(clip);
+    }
+    pub fn populate_media(&mut self) {
+        let media = std::mem::take(&mut self.media);
+        for clip in media {
+            self.add_media(clip);
+        }
+        let clips: Vec<_> = self.tracks.iter().flat_map(|t| &t.clips).cloned().collect();
+        for clip in clips {
+            self.add_media(clip);
+        }
+    }
+    pub fn insert_media(&mut self, path: &Path, track: usize, start: Time) -> Option<u64> {
+        if self.tracks.get(track)?.locked {
+            return None;
+        }
+        let mut clip = self.media.iter().find(|clip| clip.path == path)?.clone();
+        clip.id = self.next_id;
+        self.next_id += 1;
+        clip.start = start.max(0);
+        // Bin transforms describe a source fitted to the canonical 16:9 canvas.
+        // Fit each new instance to the current output without stretching it.
+        if clip.visual {
+            let aspect = clip.transform.width / clip.transform.height * 1920. / 1080.;
+            let relative = aspect / (self.width as f32 / self.height as f32);
+            clip.transform.width = relative.min(1.);
+            clip.transform.height = (1. / relative).min(1.);
+        }
+        let id = clip.id;
+        self.tracks[track].clips.push(clip);
+        Some(id)
+    }
     pub fn duration(&self) -> Time {
         self.tracks
             .iter()
@@ -201,10 +390,37 @@ impl Project {
             bail!("Unsupported project settings");
         }
         let mut ids = std::collections::HashSet::new();
-        for c in self.tracks.iter().flat_map(|t| &t.clips) {
+        for (c, timeline) in self
+            .tracks
+            .iter()
+            .flat_map(|t| &t.clips)
+            .map(|c| (c, true))
+            .chain(self.media.iter().map(|c| (c, false)))
+        {
+            if let Some(graphic) = &c.graphic {
+                if !c.still || !c.visual || c.audio {
+                    bail!("Invalid graphic clip");
+                }
+                if let Graphic::Text(text) = graphic {
+                    if !text.size.is_finite()
+                        || !(4. ..=512.).contains(&text.size)
+                        || text.text.len() > 16384
+                        || text.font.len() > 256
+                        || text.align > 2
+                    {
+                        bail!("Invalid text style");
+                    }
+                }
+            }
+            if c.fade_in < 0
+                || c.fade_out < 0
+                || c.fade_in > 24 * 3600 * SECOND
+                || c.fade_out > 24 * 3600 * SECOND
+            {
+                bail!("Invalid fade duration");
+            }
             let x = &c.transform;
-            if !ids.insert(c.id)
-                || c.id >= self.next_id
+            if (timeline && (!ids.insert(c.id) || c.id >= self.next_id))
                 || c.start < 0
                 || c.source_in < 0
                 || c.duration <= 0
@@ -249,7 +465,15 @@ impl Project {
     pub fn load(path: &Path) -> Result<Self> {
         let mut p: Self = serde_json::from_slice(&std::fs::read(path)?)?;
         p.validate()?;
-        for c in p.tracks.iter_mut().flat_map(|t| &mut t.clips) {
+        for c in p
+            .tracks
+            .iter_mut()
+            .flat_map(|t| &mut t.clips)
+            .chain(p.media.iter_mut())
+        {
+            if c.graphic.is_some() {
+                continue;
+            }
             if c.path.is_relative() {
                 c.path = path.parent().unwrap_or(Path::new(".")).join(&c.path);
             }
@@ -285,6 +509,46 @@ impl History {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn media_bin_is_saved_without_adding_timeline_clips() {
+        let mut project = Project::default();
+        let asset = fixture().tracks[0].clips[0].clone();
+        project.add_media(asset.clone());
+        project.add_media(asset);
+        assert_eq!(project.media.len(), 1);
+        assert_eq!(project.duration(), 0);
+        let bytes = serde_json::to_vec(&project).unwrap();
+        let mut restored: Project = serde_json::from_slice(&bytes).unwrap();
+        restored.validate().unwrap();
+        let first = restored
+            .insert_media(Path::new("a.mp4"), 0, SECOND)
+            .unwrap();
+        let second = restored
+            .insert_media(Path::new("a.mp4"), 1, 3 * SECOND)
+            .unwrap();
+        assert_ne!(first, second);
+        restored.clip_mut(first).unwrap().transform.opacity = 0.5;
+        assert_eq!(restored.clip(second).unwrap().transform.opacity, 1.);
+        assert_eq!(restored.media[0].transform.opacity, 1.);
+        restored.tracks[2].locked = true;
+        assert!(restored.insert_media(Path::new("a.mp4"), 2, 0).is_none());
+        restored.validate().unwrap();
+    }
+
+    #[test]
+    fn old_projects_get_a_media_bin_without_changing_the_edit() {
+        let original = fixture();
+        let mut json = serde_json::to_value(&original).unwrap();
+        json.as_object_mut().unwrap().remove("media");
+        let mut loaded: Project = serde_json::from_value(json).unwrap();
+        loaded.populate_media();
+        assert_eq!(loaded.tracks, original.tracks);
+        assert_eq!(loaded.media.len(), 1);
+        assert_eq!(loaded.media[0].source_in, 0);
+        assert_eq!(loaded.media[0].duration, loaded.media[0].source_duration);
+        loaded.validate().unwrap();
+    }
+
     fn fixture() -> Project {
         let mut p = Project::default();
         p.next_id = 2;
@@ -300,8 +564,24 @@ mod tests {
             still: false,
             transform: Transform::default(),
             gain: 1.,
+            graphic: None,
+            fade_in: 0,
+            fade_out: 0,
         });
         p
+    }
+    #[test]
+    fn new_media_instances_fit_the_current_canvas_without_stretching() {
+        let mut p = fixture();
+        let source = p.tracks[0].clips[0].clone();
+        p.add_media(source.clone());
+        p.resize_canvas(1080, 1920).unwrap();
+        let id = p.insert_media(&source.path, 1, 0).unwrap();
+        let t = &p.clip(id).unwrap().transform;
+        let aspect = t.width * p.width as f32 / (t.height * p.height as f32);
+        assert!((aspect - 16. / 9.).abs() < 0.001);
+        assert!(t.width <= 1. && t.height <= 1.);
+        p.validate().unwrap();
     }
     #[test]
     fn split_preserves_source_and_exclusive_bounds() {

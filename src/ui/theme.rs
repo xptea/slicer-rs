@@ -1,6 +1,7 @@
 //! Neutral palette and GPUI component theme.
 
 pub(super) const CONTENT_GUTTER: f32 = 24.;
+pub(super) const WINDOW_RADIUS: f32 = 9.;
 use gpui_kit::{
     component::{Theme, ThemeMode},
     gpui::*,

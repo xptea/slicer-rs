@@ -200,7 +200,7 @@ impl SlicerApp {
         cx: &mut Context<Self>,
     ) {
         if self.screen == Screen::Studio {
-            self.studio_key(event, cx);
+            self.studio_keyboard(event, window, cx);
             return;
         }
         if self.screen != Screen::Editor {

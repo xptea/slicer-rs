@@ -23,6 +23,8 @@ mod settings_view;
 mod studio;
 mod theme;
 mod timeline;
+mod timeline_thumbnails;
+mod timeline_waveforms;
 mod window_frame;
 mod workers;
 
@@ -323,6 +325,7 @@ impl Render for SlicerApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.poll_background(window, cx);
         self.poll_studio(window);
+        self.studio_inputs(window, cx);
         if !cx.has_active_drag() {
             self.external_drop = None;
         }
@@ -352,7 +355,10 @@ impl Render for SlicerApp {
                 if this.screen == Screen::Studio {
                     this.studio_drag(
                         event.position,
-                        event.pressed_button == Some(MouseButton::Left),
+                        matches!(
+                            event.pressed_button,
+                            Some(MouseButton::Left | MouseButton::Middle)
+                        ),
                         cx,
                     );
                 } else if this.crop.open {
@@ -380,6 +386,14 @@ impl Render for SlicerApp {
                     }
                     this.finish_crop_drag();
                     this.finish_timeline_drag(cx);
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(|this, event: &MouseUpEvent, _, cx| {
+                    if this.screen == Screen::Studio {
+                        this.studio_drag(event.position, false, cx);
+                    }
                 }),
             )
             .on_drag_move::<ExternalPaths>(cx.listener(
@@ -410,22 +424,30 @@ impl Render for SlicerApp {
             layer = layer.child(self.export_toast(cx));
         }
         if self.external_drop.is_some() && self.screen != Screen::Home {
-            layer = layer.child(
-                div()
-                    .absolute()
-                    .inset_0()
-                    .m(px(CONTENT_GUTTER))
-                    .rounded(px(18.))
-                    .border_3()
-                    .border_color(ink(TEXT))
-                    .bg(rgba(0x090909ee))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .child(div().text_xl().font_bold().child("Drop video to open")),
-            );
+            layer =
+                layer.child(
+                    div()
+                        .absolute()
+                        .inset_0()
+                        .m(px(CONTENT_GUTTER))
+                        .rounded(px(18.))
+                        .border_3()
+                        .border_color(ink(TEXT))
+                        .bg(rgba(0x090909ee))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(div().text_xl().font_bold().child(
+                            if self.screen == Screen::Studio {
+                                "Drop to add to Files"
+                            } else {
+                                "Drop video to open"
+                            },
+                        )),
+                );
         }
-        window_frame::frame(layer, window, cx)
+        let tools = (self.screen == Screen::Studio).then(|| self.studio_title_tools(cx));
+        window_frame::frame(layer, tools, window, cx)
     }
 }
 

@@ -122,7 +122,6 @@ struct AudioOutput {
         usize,
         *mut i32,
     ) -> i32,
-    flush: unsafe extern "C" fn(*mut std::ffi::c_void, *mut i32) -> i32,
     latency: unsafe extern "C" fn(*mut std::ffi::c_void, *mut i32) -> u64,
     free: unsafe extern "C" fn(*mut std::ffi::c_void),
 }
@@ -151,7 +150,9 @@ impl AudioOutput {
             let attr = BufferAttr {
                 maxlength: 38400,
                 tlength: 15360,
-                prebuf: 0,
+                // Wait for a real audio buffer before starting the device clock.
+                // A zero prebuffer runs through underruns while media is paused.
+                prebuf: 15360,
                 minreq: 7680,
                 fragsize: u32::MAX,
             };
@@ -172,16 +173,10 @@ impl AudioOutput {
             Ok(Self {
                 raw,
                 write: *lib.get(b"pa_simple_write\0")?,
-                flush: *lib.get(b"pa_simple_flush\0")?,
                 latency: *lib.get(b"pa_simple_get_latency\0")?,
                 free: *lib.get(b"pa_simple_free\0")?,
                 _lib: lib,
             })
-        }
-    }
-    fn flush(&mut self) {
-        unsafe {
-            (self.flush)(self.raw, &mut 0);
         }
     }
     fn write(&mut self, data: &[f32]) -> anyhow::Result<i64> {
@@ -210,7 +205,7 @@ impl Drop for AudioOutput {
     }
 }
 fn audio_loop(shared: Arc<Shared>) {
-    let mut output: Option<AudioOutput> = AudioOutput::new().ok();
+    let mut output: Option<AudioOutput> = None;
     let mut generation = u64::MAX;
     let mut time = 0;
     let mut decoders: HashMap<u64, (std::path::PathBuf, Decoder)> = HashMap::new();
@@ -222,9 +217,11 @@ fn audio_loop(shared: Arc<Shared>) {
             while !s.stopped && !s.transport.playing {
                 // PulseAudio can block. Never hold the UI transport mutex during I/O.
                 drop(s);
-                if let Some(o) = output.as_mut() {
-                    o.flush();
-                }
+                // Flushing keeps PulseAudio's old stream timeline. After a long
+                // pause it can accept an underrun's worth of samples at once,
+                // advancing our clock by the whole paused interval on resume.
+                // Close the stream; the next transport gets a fresh clock.
+                output = None;
                 s = shared.state.lock().unwrap();
                 if !s.stopped && !s.transport.playing {
                     s = shared.wake.wait(s).unwrap();
@@ -238,9 +235,7 @@ fn audio_loop(shared: Arc<Shared>) {
         if generation != tr.generation {
             generation = tr.generation;
             time = tr.time;
-            if let Some(o) = output.as_mut() {
-                o.flush();
-            }
+            output = None;
         }
         if output.is_none() {
             match AudioOutput::new() {
@@ -298,8 +293,14 @@ fn audio_loop(shared: Arc<Shared>) {
                     shared.state.lock().unwrap().audio_error = Some(e.to_string());
                     continue;
                 }
-                for (dst, src) in mixed[offset * 2..end * 2].iter_mut().zip(&samples) {
-                    *dst += src * clip.gain;
+                for (sample, (dst, src)) in mixed[offset * 2..end * 2]
+                    .iter_mut()
+                    .zip(&samples)
+                    .enumerate()
+                {
+                    *dst += src
+                        * clip.gain
+                        * clip.fade(time + (offset + sample / 2) as i64 * 1_000_000 / 48000);
                 }
             }
         }

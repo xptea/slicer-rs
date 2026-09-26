@@ -198,11 +198,18 @@ mod desktop {
                         c.source_in + (start * SECOND as i128 / 48000) as i64 - c.start,
                         &mut samples,
                     )?;
-                    for (dst, src) in mix[((start - a0) * 2) as usize..((end - a0) * 2) as usize]
+                    for (sample, (dst, src)) in mix
+                        [((start - a0) * 2) as usize..((end - a0) * 2) as usize]
                         .iter_mut()
                         .zip(samples)
+                        .enumerate()
                     {
-                        *dst += src * c.gain;
+                        *dst += src
+                            * c.gain
+                            * c.fade(
+                                (start * SECOND as i128 / 48000) as i64
+                                    + (sample / 2) as i64 * SECOND / 48000,
+                            );
                     }
                 }
             }

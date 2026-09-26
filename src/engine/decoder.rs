@@ -48,6 +48,7 @@ unsafe extern "C" {
     );
     fn slicer_decoder_close(d: *mut c_void);
     fn slicer_decoder_error(d: *mut c_void) -> *const c_char;
+    fn slicer_decoder_preview(d: *mut c_void, size: i32);
     fn slicer_decoder_video(d: *mut c_void, time: i64, out: *mut RawVideo) -> i32;
     fn slicer_decoder_audio(d: *mut c_void, time: i64, out: *mut f32, count: i32) -> i32;
 }
@@ -83,6 +84,12 @@ pub struct Decoder {
 // Ownership moves to one worker; methods require exclusive access and never share AV contexts.
 unsafe impl Send for Decoder {}
 impl Decoder {
+    /// Small RGBA frames for the asynchronous scrub cache, never for export.
+    pub fn open_preview(path: &Path) -> Result<Self> {
+        let decoder = Self::open(path, false)?;
+        unsafe { slicer_decoder_preview(decoder.raw, 640) };
+        Ok(decoder)
+    }
     pub fn open(path: &Path, audio: bool) -> Result<Self> {
         if !path.is_file() {
             bail!("Media file is missing: {}", path.display());

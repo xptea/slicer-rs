@@ -3,6 +3,36 @@ use super::*;
 
 const HANDLE_WIDTH: f32 = 10.;
 
+// Shared by the single-file and multitrack timelines.
+pub(super) fn paint_trim_handle(window: &mut Window, center: Pixels, top: Pixels) {
+    window.paint_quad(
+        fill(
+            Bounds::new(
+                point(center - px(HANDLE_WIDTH / 2.), top),
+                size(px(HANDLE_WIDTH), px(46.)),
+            ),
+            ink(ACCENT_STRONG),
+        )
+        .corner_radii(px(4.)),
+    );
+}
+pub(super) fn paint_playhead(window: &mut Window, x: Pixels, top: Pixels) {
+    window.paint_quad(
+        fill(
+            Bounds::new(point(x - px(1.), top + px(6.)), size(px(2.), px(66.))),
+            ink(TEXT),
+        )
+        .corner_radii(px(5.)),
+    );
+    window.paint_quad(
+        fill(
+            Bounds::new(point(x - px(5.), top + px(2.)), size(px(10.), px(8.))),
+            ink(TEXT),
+        )
+        .corner_radii(px(5.)),
+    );
+}
+
 // Audio peaks are normalized to their real sample amplitude. Most spoken
 // recordings sit well below full scale, which makes a linear waveform render
 // collapse to a one-pixel line. These values only shape the visualization;
@@ -12,7 +42,7 @@ const WAVEFORM_GAMMA: f32 = 0.65;
 const WAVEFORM_GAIN: f32 = 1.2;
 const WAVEFORM_MIN_EXTENT: f32 = 0.04;
 
-fn visible_waveform_extent(raw_extent: f32) -> f32 {
+pub(super) fn visible_waveform_extent(raw_extent: f32) -> f32 {
     if !raw_extent.is_finite() || raw_extent <= 0.0 {
         return 0.0;
     }
@@ -368,37 +398,12 @@ impl SlicerApp {
                                     }
                                 }
                                 for center in [left, right] {
-                                    window.paint_quad(
-                                        fill(
-                                            Bounds::new(
-                                                point(center - px(HANDLE_WIDTH / 2.), y + px(20.)),
-                                                size(px(HANDLE_WIDTH), px(46.)),
-                                            ),
-                                            ink(ACCENT_STRONG),
-                                        )
-                                        .corner_radii(px(4.)),
-                                    );
+                                    paint_trim_handle(window, center, y + px(20.));
                                 }
-                                let playhead = domain.origin.x + domain.size.width * head;
-                                window.paint_quad(
-                                    fill(
-                                        Bounds::new(
-                                            point(playhead - px(1.), y + px(6.)),
-                                            size(px(2.), px(66.)),
-                                        ),
-                                        ink(TEXT),
-                                    )
-                                    .corner_radii(px(5.)),
-                                );
-                                window.paint_quad(
-                                    fill(
-                                        Bounds::new(
-                                            point(playhead - px(5.), y + px(2.)),
-                                            size(px(10.), px(8.)),
-                                        ),
-                                        ink(TEXT),
-                                    )
-                                    .corner_radii(px(5.)),
+                                paint_playhead(
+                                    window,
+                                    domain.origin.x + domain.size.width * head,
+                                    y,
                                 );
                             },
                         )

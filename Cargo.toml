@@ -7,7 +7,8 @@ description = "A native video trimming toolbox with bundled FFmpeg"
 
 [features]
 default = ["desktop"]
-desktop = ["dep:gpui-kit", "dep:rfd", "dep:image"]
+ui-tests = ["desktop", "gpui-kit/test-support"]
+desktop = ["dep:gpui-kit", "dep:rfd", "dep:image", "dep:cosmic-text"]
 
 [dependencies]
 anyhow = "1"
@@ -18,6 +19,7 @@ raw-window-handle = "0.6.2"
 gpui-kit = { version = "=0.6.1", optional = true }
 rfd = { version = "0.15.4", optional = true }
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"], optional = true }
+cosmic-text = { version = "0.19.0", optional = true }
 
 [build-dependencies]
 cc = "1"
@@ -45,4 +47,16 @@ required-features = ["desktop"]
 
 [[example]]
 name = "clip_switch_check"
+required-features = ["desktop"]
+
+[[example]]
+name = "scrub_check"
+required-features = ["desktop"]
+
+[[example]]
+name = "scrub_visual_check"
+required-features = ["desktop"]
+
+[[example]]
+name = "pause_check"
 required-features = ["desktop"]

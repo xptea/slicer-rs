@@ -20,7 +20,7 @@ typedef struct {
     uint8_t *pixels; int capacity;
     float *samples; int sample_capacity, sample_count; int64_t sample_start;
     int64_t current_us, next_us; int have_current, have_next;
-    char error[256]; int (*cancel)(void*); void *cancel_data;
+    char error[256]; int (*cancel)(void*); void *cancel_data; int preview_size;
 } Decoder;
 typedef struct {
     int width,height,rgba,full_range,matrix,transfer,primaries; int64_t pts_us,duration_us;
@@ -49,8 +49,9 @@ Decoder *slicer_decoder_open(const char *path,int audio,char *error,int error_le
 bad:snprintf(error,error_len,"%s",d->error[0]?d->error:"Decoder allocation failed");slicer_decoder_close(d);return NULL;
 }
 const char *slicer_decoder_error(Decoder*d){return d->error;}
+void slicer_decoder_preview(Decoder*d,int size){d->preview_size=size;}
 static int64_t pts(Decoder*d,AVFrame*f){int64_t p=f->best_effort_timestamp;if(p==AV_NOPTS_VALUE)p=f->pts;if(p==AV_NOPTS_VALUE)return 0;AVStream*s=d->format->streams[d->stream];int64_t origin=d->format->start_time!=AV_NOPTS_VALUE?d->format->start_time:0;return av_rescale_q(p,s->time_base,AV_TIME_BASE_Q)-origin;}
-static int seek_to(Decoder*d,int64_t time){AVStream*s=d->format->streams[d->stream];int64_t origin=d->format->start_time!=AV_NOPTS_VALUE?d->format->start_time:0;int64_t ts=av_rescale_q(time+origin,AV_TIME_BASE_Q,s->time_base);int r=av_seek_frame(d->format,d->stream,ts,AVSEEK_FLAG_BACKWARD);if(r<0)return fail(d,r,"Seek");avcodec_flush_buffers(d->codec);d->draining=0;d->have_current=d->have_next=0;d->sample_count=0;av_frame_unref(d->current);av_frame_unref(d->next);if(d->swr){swr_close(d->swr);swr_init(d->swr);}return 0;}
+static int seek_to(Decoder*d,int64_t time){AVStream*s=d->format->streams[d->stream];int64_t origin=d->format->start_time!=AV_NOPTS_VALUE?d->format->start_time:0;int64_t ts=av_rescale_q_rnd(time+origin,AV_TIME_BASE_Q,s->time_base,AV_ROUND_DOWN);int r=av_seek_frame(d->format,d->stream,ts,AVSEEK_FLAG_BACKWARD);if(r<0)return fail(d,r,"Seek");avcodec_flush_buffers(d->codec);d->draining=0;d->have_current=d->have_next=0;d->sample_count=0;av_frame_unref(d->current);av_frame_unref(d->next);if(d->swr){swr_close(d->swr);swr_init(d->swr);}return 0;}
 void slicer_decoder_interrupt(Decoder*d,int(*callback)(void*),void*data){d->cancel=callback;d->cancel_data=data;}
 static int read_frame(Decoder*d,AVFrame*f){
     for(;;){if(d->cancel && d->cancel(d->cancel_data))return fail(d,AVERROR_EXIT,"Decode superseded");int r=avcodec_receive_frame(d->codec,f);if(r==0)return 1;if(r==AVERROR_EOF)return 0;if(r!=AVERROR(EAGAIN))return fail(d,r,"Decode");
@@ -63,6 +64,10 @@ static int read_frame(Decoder*d,AVFrame*f){
     }
 }
 int slicer_decoder_video(Decoder*d,int64_t time,Video*out){
+    /* libmpv and ffmpeg's proxy transcode apply display matrices. Do not show
+       an unrotated software fallback before the proxy is ready. */
+    if(d->preview_size){AVCodecParameters*p=d->format->streams[d->stream]->codecpar;
+        for(int i=0;i<p->nb_coded_side_data;i++)if(p->coded_side_data[i].type==AV_PKT_DATA_DISPLAYMATRIX){snprintf(d->error,sizeof(d->error),"Preparing oriented preview");return -1;}}
     if((!d->have_current && time>0) || (d->have_current && (time<d->current_us || time>d->current_us+1000000))){if(seek_to(d,time)<0)return -1;}
     if(!d->have_current){int r=read_frame(d,d->current);if(r<=0)return r;d->current_us=pts(d,d->current);d->have_current=1;}
     for(;;){if(!d->have_next){int r=read_frame(d,d->next);if(r<0)return -1;if(!r)break;d->next_us=pts(d,d->next);d->have_next=1;}
@@ -72,14 +77,20 @@ int slicer_decoder_video(Decoder*d,int64_t time,Video*out){
     AVFrame*f=d->current;
     if(f->color_trc==AVCOL_TRC_SMPTE2084 || f->color_trc==AVCOL_TRC_ARIB_STD_B67){snprintf(d->error,sizeof(d->error),"HDR media requires a tone-mapping backend; this preview supports SDR");return -1;}
     const AVPixFmtDescriptor*desc=av_pix_fmt_desc_get(f->format);
-    int rgba=desc && (desc->flags & (AV_PIX_FMT_FLAG_RGB|AV_PIX_FMT_FLAG_ALPHA));
+    int rgba=d->preview_size || (desc && (desc->flags & (AV_PIX_FMT_FLAG_RGB|AV_PIX_FMT_FLAG_ALPHA)));
     enum AVPixelFormat target=rgba?AV_PIX_FMT_RGBA:AV_PIX_FMT_YUV420P;
-    int len=av_image_get_buffer_size(target,f->width,f->height,1);if(len<=0||f->width>8192||f->height>8192)return fail(d,AVERROR(EINVAL),"Frame dimensions");
-    if(len>d->capacity){av_free(d->pixels);d->pixels=av_malloc(len);d->capacity=len;}if(!d->pixels)return -1;
-    uint8_t*planes[4];int strides[4];av_image_fill_arrays(planes,strides,d->pixels,target,f->width,f->height,1);
-    if(f->format==target || (!rgba && f->format==AV_PIX_FMT_YUVJ420P)){av_image_copy(planes,strides,(const uint8_t**)f->data,f->linesize,target,f->width,f->height);}
-    else {d->sws=sws_getCachedContext(d->sws,f->width,f->height,f->format,f->width,f->height,target,SWS_BILINEAR,NULL,NULL,NULL);if(!d->sws)return -1;sws_scale(d->sws,(const uint8_t*const*)f->data,f->linesize,0,f->height,planes,strides);}
-    *out=(Video){.width=f->width,.height=f->height,.rgba=rgba,.full_range=(f->color_range==AVCOL_RANGE_JPEG || f->format==AV_PIX_FMT_YUVJ420P),.matrix=f->colorspace,.transfer=f->color_trc,.primaries=f->color_primaries,.pts_us=d->current_us,.duration_us=d->have_next?d->next_us-d->current_us:(f->duration>0?av_rescale_q(f->duration,d->format->streams[d->stream]->time_base,AV_TIME_BASE_Q):33333),.data=d->pixels,.length=len};return 1;
+    int w=f->width,h=f->height;
+    if(d->preview_size && (w>d->preview_size || h>d->preview_size)){double scale=(double)d->preview_size/(w>h?w:h);w=(int)(w*scale);h=(int)(h*scale);if(w<1)w=1;if(h<1)h=1;}
+    int len=av_image_get_buffer_size(target,w,h,1);if(len<=0||f->width>8192||f->height>8192)return fail(d,AVERROR(EINVAL),"Frame dimensions");
+    /* swscale's SIMD stores can extend beyond the final packed row. */
+    if(len>d->capacity){av_free(d->pixels);d->pixels=av_mallocz(len + AV_INPUT_BUFFER_PADDING_SIZE);d->capacity=len;}if(!d->pixels)return -1;
+    uint8_t*planes[4];int strides[4];av_image_fill_arrays(planes,strides,d->pixels,target,w,h,1);
+    if(w==f->width && h==f->height && (f->format==target || (!rgba && f->format==AV_PIX_FMT_YUVJ420P))){av_image_copy(planes,strides,(const uint8_t**)f->data,f->linesize,target,w,h);}
+    else {d->sws=sws_getCachedContext(d->sws,f->width,f->height,f->format,w,h,target,SWS_BILINEAR,NULL,NULL,NULL);if(!d->sws)return -1;
+        const int*coeff=sws_getCoefficients(f->colorspace==AVCOL_SPC_BT709?SWS_CS_ITU709:SWS_CS_ITU601);
+        sws_setColorspaceDetails(d->sws,coeff,f->color_range==AVCOL_RANGE_JPEG,coeff,rgba?1:f->color_range==AVCOL_RANGE_JPEG,0,1<<16,1<<16);
+        sws_scale(d->sws,(const uint8_t*const*)f->data,f->linesize,0,f->height,planes,strides);}
+    *out=(Video){.width=w,.height=h,.rgba=rgba,.full_range=(rgba || f->color_range==AVCOL_RANGE_JPEG || f->format==AV_PIX_FMT_YUVJ420P),.matrix=f->colorspace,.transfer=f->color_trc,.primaries=f->color_primaries,.pts_us=d->current_us,.duration_us=d->have_next?d->next_us-d->current_us:(f->duration>0?av_rescale_q(f->duration,d->format->streams[d->stream]->time_base,AV_TIME_BASE_Q):33333),.data=d->pixels,.length=len};return 1;
 }
 /* Timestamp-addressed, stereo float output. Gaps and EOF are silence. */
 int slicer_decoder_audio(Decoder*d,int64_t time,float*out,int count){
