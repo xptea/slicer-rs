@@ -27,6 +27,8 @@ function Get-LockedValue([string]$Key) {
 $FfmpegVersion = Get-LockedValue 'FFMPEG_VERSION'
 $SourceArchiveName = Get-LockedValue 'FFMPEG_SOURCE_ARCHIVE'
 $SourceSha256 = (Get-LockedValue 'FFMPEG_SOURCE_SHA256').ToLowerInvariant()
+$OpenH264ArchiveName = Get-LockedValue 'OPENH264_SOURCE_ARCHIVE'
+$OpenH264Sha256 = (Get-LockedValue 'OPENH264_SOURCE_SHA256').ToLowerInvariant()
 
 if ([string]::IsNullOrWhiteSpace($Binary)) {
     $release = Join-Path $Root 'target\release\slicer.exe'
@@ -57,8 +59,13 @@ if ([string]::IsNullOrWhiteSpace($Name)) {
 
 $ffmpeg = Join-Path $FfmpegBundle 'bin\ffmpeg.exe'
 $ffprobe = Join-Path $FfmpegBundle 'bin\ffprobe.exe'
+$hasH264 = $false
+if (Test-Path -LiteralPath $ffmpeg -PathType Leaf) {
+    $availableEncoders = & $ffmpeg -hide_banner -encoders 2>$null
+    $hasH264 = $LASTEXITCODE -eq 0 -and [bool]($availableEncoders -match '\blibopenh264\b')
+}
 if (!(Test-Path -LiteralPath $ffmpeg -PathType Leaf) -or
-    !(Test-Path -LiteralPath $ffprobe -PathType Leaf)) {
+    !(Test-Path -LiteralPath $ffprobe -PathType Leaf) -or !$hasH264) {
     $bash = Get-Command bash -ErrorAction SilentlyContinue
     if ($null -eq $bash) {
         throw "FFmpeg bundle is missing. Build it with scripts/build-ffmpeg.sh --target windows-x86_64 from a MinGW shell, then pass -FfmpegBundle."
@@ -77,6 +84,17 @@ foreach ($program in @($ffmpeg, $ffprobe)) {
         throw "FFmpeg bundle lacks $program"
     }
 }
+$encoders = & $ffmpeg -hide_banner -encoders 2>$null
+if ($LASTEXITCODE -ne 0 -or !($encoders -match '\blibopenh264\b')) {
+    throw 'Export bundle lacks unified OpenH264 encoding. Rebuild the pinned FFmpeg bundle.'
+}
+$openH264Archive = Join-Path $FfmpegBundle (Join-Path 'source' $OpenH264ArchiveName)
+if (!(Test-Path -LiteralPath $openH264Archive -PathType Leaf)) {
+    throw 'Pinned OpenH264 source archive is missing.'
+}
+if ((Get-FileHash -LiteralPath $openH264Archive -Algorithm SHA256).Hash.ToLowerInvariant() -ne $OpenH264Sha256) {
+    throw 'OpenH264 source SHA-256 mismatch.'
+}
 $sourceArchive = Join-Path $FfmpegBundle (Join-Path 'source' $SourceArchiveName)
 if (!(Test-Path -LiteralPath $sourceArchive -PathType Leaf)) {
     throw "Pinned FFmpeg source archive is missing: $sourceArchive"
@@ -87,6 +105,7 @@ if ($actualHash -ne $SourceSha256) {
 }
 foreach ($material in @(
         (Join-Path $FfmpegBundle 'COPYING.LGPLv2.1'),
+        (Join-Path $FfmpegBundle 'COPYING.OPENH264'),
         (Join-Path $FfmpegBundle 'FFMPEG-NOTICE.txt'),
         (Join-Path $FfmpegBundle 'source\PROVENANCE.txt'))) {
     if (!(Test-Path -LiteralPath $material -PathType Leaf)) {
@@ -118,6 +137,7 @@ foreach ($item in Get-ChildItem -LiteralPath (Join-Path $FfmpegBundle 'source'))
     Copy-Item -LiteralPath $item.FullName -Destination $sourceOut -Recurse -Force
 }
 Copy-Item -LiteralPath (Join-Path $FfmpegBundle 'COPYING.LGPLv2.1') -Destination $noticeOut
+Copy-Item -LiteralPath (Join-Path $FfmpegBundle 'COPYING.OPENH264') -Destination $noticeOut
 Copy-Item -LiteralPath (Join-Path $FfmpegBundle 'FFMPEG-NOTICE.txt') -Destination $noticeOut
 $zlibNotice = Join-Path $FfmpegBundle 'ZLIB-NOTICE.txt'
 if (Test-Path -LiteralPath $zlibNotice -PathType Leaf) {

@@ -14,3 +14,9 @@ FFMPEG_SIGNATURE_SHA256=7ce4b9d56e3ef0cd4c3a9c0b2c8a034ac91e6c4c011c1f10b05a8aa7
 FFMPEG_RELEASE_KEY_URL=https://ffmpeg.org/ffmpeg-devel.asc
 FFMPEG_RELEASE_KEY_FINGERPRINT=FCF986EA15E6E293A5644F10B4322F04D67658D8
 FFMPEG_LICENSE=LGPL-2.1-or-later
+
+# Common software H.264 encoder, compiled statically into FFmpeg on all targets.
+OPENH264_VERSION=2.6.0
+OPENH264_SOURCE_ARCHIVE=openh264-2.6.0.tar.gz
+OPENH264_SOURCE_URL=https://github.com/cisco/openh264/archive/refs/tags/v2.6.0.tar.gz
+OPENH264_SOURCE_SHA256=558544ad358283a7ab2930d69a9ceddf913f4a51ee9bf1bfb9e377322af81a69

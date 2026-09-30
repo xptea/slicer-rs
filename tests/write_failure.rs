@@ -13,13 +13,16 @@ fn failed_output_write_never_publishes_or_leaves_partial_file() {
     // failure-injection fixture. The last argument is the reserved temp file.
     fs::write(&fake, "#!/bin/sh\nfor output do :; done\nprintf partial > \"$output\"\nprintf 'No space left on device\\n' >&2\nexit 1\n").unwrap();
     fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
+    let probe = dir.path().join("ffprobe");
+    fs::write(&probe, "#!/bin/sh\nprintf '%s' '{\"streams\":[{\"codec_type\":\"video\",\"bit_rate\":\"200000\"}]}'\n").unwrap();
+    fs::set_permissions(&probe, fs::Permissions::from_mode(0o700)).unwrap();
     let input = dir.path().join("original.mp4");
     fs::write(&input, b"original data").unwrap();
     let output = dir.path().join("result.mp4");
     let job = JobHandle::spawn(
         Binaries {
             ffmpeg: fake.clone(),
-            ffprobe: fake,
+            ffprobe: probe,
         },
         ExportRequest {
             input: input.clone(),
@@ -48,7 +51,7 @@ fn failed_output_write_never_publishes_or_leaves_partial_file() {
     assert_eq!(fs::read(input).unwrap(), b"original data");
     assert_eq!(
         fs::read_dir(dir.path()).unwrap().count(),
-        2,
+        3,
         "partial output leaked"
     );
 }

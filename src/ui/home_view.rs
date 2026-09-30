@@ -46,13 +46,41 @@ impl SlicerApp {
             .child("Open Video File")
             .on_click(cx.listener(|this, _, _, _| this.launch_dialog(DialogKind::Open)));
 
-        div()
+        v_flex()
             .size_full()
             .px(px(12.))
             .pb(px(12.))
+            .gap_3()
+            .when_some(self.available_update.as_ref(), |view, update| {
+                let url = update.download_url.clone();
+                view.child(
+                    h_flex()
+                        .w_full()
+                        .gap_3()
+                        .p_3()
+                        .rounded(px(10.))
+                        .bg(ink(SURFACE))
+                        .border_1()
+                        .border_color(ink(BORDER))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w(px(0.))
+                                .child(format!("Slicer {} is available", update.version)),
+                        )
+                        .child(
+                            Button::new("download-update")
+                                .primary()
+                                .label("Download")
+                                .on_click(cx.listener(move |_, _, _, cx| cx.open_url(&url))),
+                        ),
+                )
+            })
             .child(
                 v_flex()
-                    .size_full()
+                    .w_full()
+                    .flex_1()
+                    .min_h(px(0.))
                     .relative()
                     .id("home-drop-zone")
                     .rounded(px(18.))

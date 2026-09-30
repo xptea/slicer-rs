@@ -40,16 +40,18 @@ impl SlicerApp {
             .px_6()
             .py_4()
             .gap_6()
+            .items_center()
             .child(
                 v_flex()
                     .gap_4()
-                    .max_w(px(760.))
+                    .w_full()
+                    .max_w(px(560.))
                     .child(
                         v_flex().gap_1().child(
                             div()
                                 .text_color(ink(TEXT))
                                 .font_semibold()
-                                .child("Video library"),
+                                .child("Listing directory"),
                         ),
                     )
                     .child(
@@ -74,7 +76,8 @@ impl SlicerApp {
             .child(
                 v_flex()
                     .gap_4()
-                    .max_w(px(760.))
+                    .w_full()
+                    .max_w(px(560.))
                     .child(
                         v_flex().gap_1().child(
                             div()
@@ -158,16 +161,33 @@ impl SlicerApp {
                             })),
                     ),
             )
+            .child(
+                h_flex()
+                    .w_full()
+                    .max_w(px(560.))
+                    .justify_between()
+                    .text_sm()
+                    .text_color(ink(MUTED))
+                    .child("Version")
+                    .child(slicer::updates::LOCAL_VERSION),
+            )
             .when_some(self.settings_error.clone(), |this, error| {
                 this.child(
                     div()
-                        .max_w(px(760.))
+                        .w_full()
+                        .max_w(px(560.))
                         .text_color(ink(BAD))
                         .text_sm()
                         .child(error),
                 )
             })
-            .child(h_flex().w_full().justify_center().child(home))
+            .child(
+                h_flex()
+                    .w_full()
+                    .max_w(px(560.))
+                    .justify_center()
+                    .child(home),
+            )
             .into_any_element()
     }
 

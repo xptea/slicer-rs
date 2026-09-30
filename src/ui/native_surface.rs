@@ -1,4 +1,4 @@
-//! A native X11 child window for GPU video presentation.
+//! Native X11 and AppKit drawables for GPU video presentation.
 //!
 //! GPUI's Linux renderer owns the top-level window and paints its scene with
 //! wgpu.  A video renderer such as libmpv cannot paint into that scene without
@@ -7,7 +7,7 @@
 //! to that drawable.  No video frame is copied through the CPU or GPUI's image
 //! cache.
 //!
-//! This module intentionally supports X11 only.  Wayland does not allow an
+//! The Linux implementation supports X11 only.  Wayland does not allow an
 //! arbitrary foreign surface to be embedded as a child of an `xdg_toplevel`.
 //! On a Wayland desktop, run Slicer through XWayland by removing
 //! `WAYLAND_DISPLAY` before GPUI initializes and keeping `DISPLAY` set.  The
@@ -15,11 +15,14 @@
 //! of silently falling back to a screenshot or CPU frame path.
 
 use anyhow::{Result, anyhow};
+#[cfg(not(target_os = "macos"))]
 use gpui_kit::Refineable;
+#[cfg(not(target_os = "macos"))]
 use gpui_kit::gpui::{
-    App, Bounds, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement, LayoutId,
-    Pixels, Style, StyleRefinement, Styled, Window,
+    App, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Style,
+    StyleRefinement, Styled,
 };
+use gpui_kit::gpui::{Bounds, Pixels, Window};
 
 #[cfg(target_os = "linux")]
 mod platform {
@@ -659,7 +662,7 @@ mod platform {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 mod platform {
     use super::*;
 
@@ -788,4 +791,10 @@ mod platform {
 }
 
 #[allow(unused_imports)]
-pub use platform::{NativeSurface, NativeSurfaceElement};
+pub use platform::NativeSurface;
+#[cfg(not(target_os = "macos"))]
+pub use platform::NativeSurfaceElement;
+
+#[cfg(target_os = "macos")]
+#[path = "native_surface_macos.rs"]
+mod platform;

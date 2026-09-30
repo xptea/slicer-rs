@@ -194,7 +194,7 @@ fn mpv_library_name() -> &'static str {
 
 struct MpvApi {
     // Keep the library alive for as long as any copied function pointer is used.
-    _library: Library,
+    _library: Arc<Library>,
     create: MpvCreate,
     initialize: MpvInitialize,
     terminate_destroy: MpvTerminateDestroy,
@@ -242,7 +242,7 @@ impl MpvApi {
                     .map(|symbol| *symbol)
             },
             error_string: unsafe { symbol(&library, b"mpv_error_string\0")? },
-            _library: library,
+            _library: Arc::new(library),
         })
     }
 
@@ -258,9 +258,10 @@ impl MpvApi {
     }
 }
 
-// The library is moved to the one worker that owns every mpv call. It is never
-// accessed concurrently from another thread.
+// The worker owns client calls; macOS also retains the same API for its renderer.
 unsafe impl Send for MpvApi {}
+// The client and render APIs permit concurrent calls from their owning threads.
+unsafe impl Sync for MpvApi {}
 
 #[repr(C)]
 struct MpvEvent {
@@ -497,6 +498,8 @@ unsafe impl Send for MpvWaker {}
 unsafe impl Sync for MpvWaker {}
 
 struct Shared {
+    #[cfg(target_os = "macos")]
+    core: Mutex<Option<Arc<MacCore>>>,
     commands: SyncSender<WorkerCommand>,
     pending_seek: Mutex<Option<SeekRequest>>,
     pending_controls: Mutex<PendingControls>,
@@ -553,11 +556,13 @@ impl NativePlayer {
             ));
         }
         let api_began = Instant::now();
-        let api = MpvApi::load(&library)?;
+        let api = Arc::new(MpvApi::load(&library)?);
         startup_timing("load_library", api_began);
         let state = Arc::new(SharedState::default());
         let (commands, receiver) = mpsc::sync_channel(32);
         let shared = Arc::new(Shared {
+            #[cfg(target_os = "macos")]
+            core: Mutex::new(None),
             commands,
             pending_seek: Mutex::new(None),
             pending_controls: Mutex::new(PendingControls::default()),
@@ -793,7 +798,7 @@ impl Drop for NativePlayer {
 }
 
 struct PlayerWorker {
-    api: MpvApi,
+    api: Arc<MpvApi>,
     handle: *mut MpvHandle,
     shared: Arc<Shared>,
     state: Arc<SharedState>,
@@ -805,6 +810,7 @@ struct PlayerWorker {
     last_approximate_seek: Option<Instant>,
     seek_in_flight: Option<SeekRequest>,
     seek_started: Option<Instant>,
+    last_completed_seek: Option<f64>,
     next_command_userdata: u64,
     pending_commands: HashMap<u64, PendingCommand>,
     last_pause_command: Option<bool>,
@@ -817,7 +823,7 @@ unsafe impl Send for PlayerWorker {}
 
 impl PlayerWorker {
     fn initialize(
-        api: MpvApi,
+        api: Arc<MpvApi>,
         window_id: u64,
         shared: Arc<Shared>,
         state: Arc<SharedState>,
@@ -844,6 +850,17 @@ impl PlayerWorker {
             return Err(error);
         }
 
+        #[cfg(target_os = "macos")]
+        {
+            *shared
+                .core
+                .lock()
+                .map_err(|_| "player core lock poisoned")? = Some(Arc::new(MacCore {
+                handle: handle as usize,
+                api: Arc::clone(&api),
+            }));
+        }
+
         let mut worker = Self {
             api,
             handle,
@@ -857,6 +874,7 @@ impl PlayerWorker {
             last_approximate_seek: None,
             seek_in_flight: None,
             seek_started: None,
+            last_completed_seek: None,
             next_command_userdata: 1,
             pending_commands: HashMap::new(),
             last_pause_command: None,
@@ -913,50 +931,67 @@ impl PlayerWorker {
             set_option(api, handle, "ao", "null")?;
             set_option(api, handle, "hwdec", "no")?;
         } else {
-            #[cfg(target_os = "linux")]
-            set_option(api, handle, "wid", &window_id.to_string())?;
-
-            // Keep libmpv on its lightweight OpenGL presentation path on
-            // Linux. Vulkan is excellent for the GPUI scene, but asking mpv
-            // to create a second Vulkan device in the same process causes the
-            // NVIDIA driver to map another large allocator and shader stack.
-            // OpenGL still presents directly to the native X11 child (there
-            // are no CPU frame copies) while avoiding that duplicate Vulkan
-            // allocation. An explicit override is available for diagnostics
-            // and for platforms with a different native video backend.
-            let gpu_api = std::env::var("SLICER_MPV_GPU_API").unwrap_or_else(|_| {
-                if cfg!(target_os = "linux") {
-                    "opengl".to_owned()
-                } else {
-                    String::new()
-                }
-            });
-            if !gpu_api.is_empty() {
-                set_option(api, handle, "gpu-api", &gpu_api).map_err(|error| {
-                    format!("SLICER_MPV_GPU_API={gpu_api:?} is not supported by libmpv: {error}")
-                })?;
-            }
-
-            // mpv treats a comma-separated vo value as a priority list, so
-            // backend initialization can fall through from gpu-next to gpu.
-            // Neither path creates CPU frames or a PNG preview. Older private
-            // builds that reject a list get the explicit gpu fallback.
-            if set_option(api, handle, "vo", "gpu-next,gpu").is_err()
-                && set_option(api, handle, "vo", "gpu").is_err()
+            #[cfg(target_os = "macos")]
             {
-                return Err("libmpv could not configure gpu-next or gpu video output".to_owned());
+                // Slicer owns a CGL drawable and uses the render API. Current mpv
+                // macvk backends cannot embed with wid and would open another window.
+                set_option(api, handle, "vo", "libmpv")?;
+                let hwdec =
+                    std::env::var("SLICER_MPV_HWDEC").unwrap_or_else(|_| "videotoolbox".to_owned());
+                set_option(api, handle, "hwdec", &hwdec)?;
+                return Ok(());
             }
-            if let Some(hwdec) = std::env::var_os("SLICER_MPV_HWDEC") {
-                let hwdec = hwdec.to_string_lossy();
-                set_option(api, handle, "hwdec", &hwdec).map_err(|error| {
-                    format!("SLICER_MPV_HWDEC={hwdec:?} is not supported by libmpv: {error}")
-                })?;
-            // Vulkan Video decoding stalled during repeated seeks on the
-            // tested NVIDIA driver. Prefer the established native decoders;
-            // mpv falls back to software decoding for unsupported hardware.
-            // GPU presentation remains enabled in either case.
-            } else if set_option(api, handle, "hwdec", "nvdec,vaapi").is_err() {
-                set_option(api, handle, "hwdec", "no")?;
+            #[cfg(not(target_os = "macos"))]
+            {
+                #[cfg(target_os = "linux")]
+                set_option(api, handle, "wid", &window_id.to_string())?;
+
+                // Keep libmpv on its lightweight OpenGL presentation path on
+                // Linux. Vulkan is excellent for the GPUI scene, but asking mpv
+                // to create a second Vulkan device in the same process causes the
+                // NVIDIA driver to map another large allocator and shader stack.
+                // OpenGL still presents directly to the native X11 child (there
+                // are no CPU frame copies) while avoiding that duplicate Vulkan
+                // allocation. An explicit override is available for diagnostics
+                // and for platforms with a different native video backend.
+                let gpu_api = std::env::var("SLICER_MPV_GPU_API").unwrap_or_else(|_| {
+                    if cfg!(target_os = "linux") {
+                        "opengl".to_owned()
+                    } else {
+                        String::new()
+                    }
+                });
+                if !gpu_api.is_empty() {
+                    set_option(api, handle, "gpu-api", &gpu_api).map_err(|error| {
+                        format!(
+                            "SLICER_MPV_GPU_API={gpu_api:?} is not supported by libmpv: {error}"
+                        )
+                    })?;
+                }
+
+                // mpv treats a comma-separated vo value as a priority list, so
+                // backend initialization can fall through from gpu-next to gpu.
+                // Neither path creates CPU frames or a PNG preview. Older private
+                // builds that reject a list get the explicit gpu fallback.
+                if set_option(api, handle, "vo", "gpu-next,gpu").is_err()
+                    && set_option(api, handle, "vo", "gpu").is_err()
+                {
+                    return Err(
+                        "libmpv could not configure gpu-next or gpu video output".to_owned()
+                    );
+                }
+                if let Some(hwdec) = std::env::var_os("SLICER_MPV_HWDEC") {
+                    let hwdec = hwdec.to_string_lossy();
+                    set_option(api, handle, "hwdec", &hwdec).map_err(|error| {
+                        format!("SLICER_MPV_HWDEC={hwdec:?} is not supported by libmpv: {error}")
+                    })?;
+                // Vulkan Video decoding stalled during repeated seeks on the
+                // tested NVIDIA driver. Prefer the established native decoders;
+                // mpv falls back to software decoding for unsupported hardware.
+                // GPU presentation remains enabled in either case.
+                } else if set_option(api, handle, "hwdec", "nvdec,vaapi").is_err() {
+                    set_option(api, handle, "hwdec", "no")?;
+                }
             }
         }
         Ok(())
@@ -1037,7 +1072,10 @@ impl PlayerWorker {
         // about to be destroyed. NativePlayer::drop may race this cleanup
         // while waiting for the worker to finish.
         self.shared.set_mpv_waker(None);
-        unsafe { (self.api.terminate_destroy)(self.handle) };
+        #[cfg(not(target_os = "macos"))]
+        unsafe {
+            (self.api.terminate_destroy)(self.handle)
+        };
         self.state.loaded.store(false, Ordering::Release);
     }
 
@@ -1110,13 +1148,12 @@ impl PlayerWorker {
             return;
         };
 
-        // Keep only one drag seek in flight. Once mpv reports that seek as
-        // settled, the newest pending target is dispatched. A private runtime
+        // Keep only one drag seek in flight. Once mpv presents its first
+        // frame (PLAYBACK_RESTART), the newest pending target is dispatched. A private runtime
         // may omit the `seeking` property, so an approximate request has a
         // bounded fallback timeout; exact release requests wait for their
         // completion instead of overlapping decoder work.
         if let Some(in_flight) = self.seek_in_flight {
-            let seeking = self.state.seeking.load(Ordering::Acquire);
             let timed_out = self.seek_started.is_some_and(|started| {
                 started.elapsed()
                     >= if in_flight.exact {
@@ -1125,7 +1162,7 @@ impl PlayerWorker {
                         DRAG_SEEK_SETTLE_TIMEOUT
                     }
             });
-            if !seeking || timed_out {
+            if timed_out {
                 self.seek_in_flight = None;
                 self.seek_started = None;
             } else {
@@ -1154,6 +1191,17 @@ impl PlayerWorker {
         };
         let Some(request) = request else { return };
         if request.serial <= self.last_seek_serial {
+            return;
+        }
+        // Mouse release often repeats the last drag target. Once that frame
+        // has been presented, restarting the same decoder adds visible latency.
+        if self.state.paused.load(Ordering::Acquire)
+            && self.last_completed_seek == Some(request.seconds)
+            && (f64::from_bits(self.state.position.load(Ordering::Acquire)) - request.seconds).abs()
+                < 0.1
+        {
+            self.last_seek_serial = request.serial;
+            self.state.seeking.store(false, Ordering::Release);
             return;
         }
         let was_at_end = self.eof_latched || self.state.eof.load(Ordering::Acquire);
@@ -1226,6 +1274,7 @@ impl PlayerWorker {
         self.eof_latched = false;
         self.replay_pending = false;
         self.last_approximate_seek = None;
+        self.last_completed_seek = None;
         self.seek_in_flight = None;
         self.seek_started = None;
         // mpv may change pause while replacing a file or reaching EOF. Do not
@@ -1479,6 +1528,7 @@ impl PlayerWorker {
             }
             MPV_EVENT_SEEK => self.state.seeking.store(true, Ordering::Release),
             MPV_EVENT_PLAYBACK_RESTART => {
+                self.last_completed_seek = self.seek_in_flight.map(|request| request.seconds);
                 self.state.seeking.store(false, Ordering::Release);
                 self.seek_in_flight = None;
                 self.seek_started = None;
@@ -1603,10 +1653,8 @@ impl PlayerWorker {
             b"seeking" if property.format == MPV_FORMAT_FLAG => {
                 let seeking = unsafe { *(property.data as *const c_int) != 0 };
                 self.state.seeking.store(seeking, Ordering::Release);
-                if !seeking {
-                    self.seek_in_flight = None;
-                    self.seek_started = None;
-                }
+                // seeking=false can precede the first presented frame. Keep
+                // the decoder restart in flight until PLAYBACK_RESTART.
             }
             b"hwdec-current" if property.format == MPV_FORMAT_STRING => {
                 self.state
@@ -1817,6 +1865,8 @@ mod tests {
     #[test]
     fn seek_requests_are_latest_wins() {
         let shared = Shared {
+            #[cfg(target_os = "macos")]
+            core: Mutex::new(None),
             commands: mpsc::sync_channel(1).0,
             pending_seek: Mutex::new(None),
             pending_controls: Mutex::new(PendingControls::default()),
@@ -1840,3 +1890,11 @@ mod tests {
         assert!(request.exact);
     }
 }
+
+#[cfg(target_os = "macos")]
+#[path = "native_player_macos.rs"]
+mod macos;
+#[cfg(target_os = "macos")]
+use macos::MacCore;
+#[cfg(target_os = "macos")]
+pub use macos::OpenGlRenderer;

@@ -195,8 +195,9 @@ if [[ "$ALLOW_MISSING_PLAYBACK_SOURCES" != 1 ]] &&
 fi
 "$ROOT_DIR/scripts/bundle-playback-linux.sh" --check "$PLAYBACK_BUNDLE"
 
-if [[ ! -x "$FFMPEG_BUNDLE/bin/ffmpeg" || ! -x "$FFMPEG_BUNDLE/bin/ffprobe" ]]; then
-    printf 'FFmpeg bundle is missing; building the pinned source profile\n'
+if [[ ! -x "$FFMPEG_BUNDLE/bin/ffmpeg" || ! -x "$FFMPEG_BUNDLE/bin/ffprobe" ]] ||
+    ! "$FFMPEG_BUNDLE/bin/ffmpeg" -hide_banner -encoders 2>/dev/null | awk '$2 == "libopenh264" { found=1 } END { exit !found }'; then
+    printf 'FFmpeg bundle is missing or stale; building the pinned source profile\n'
     BUILD_ARGS=(--target "$TARGET" --output "$FFMPEG_BUNDLE")
     [[ -n "$JOBS" ]] && BUILD_ARGS+=(--jobs "$JOBS")
     "$ROOT_DIR/scripts/build-ffmpeg.sh" "${BUILD_ARGS[@]}"
@@ -209,6 +210,8 @@ for program in ffmpeg ffprobe; do
         exit 1
     }
 done
+
+"$ROOT_DIR/scripts/verify-export-bundle.sh" "$FFMPEG_BUNDLE"
 
 SOURCE_ARCHIVE="$FFMPEG_BUNDLE/source/$FFMPEG_SOURCE_ARCHIVE"
 [[ -f "$SOURCE_ARCHIVE" ]] || {
@@ -295,6 +298,7 @@ install -m 644 "$PLAYBACK_BUNDLE/PROVENANCE.txt" \
     "$PACKAGE_DIR/share/slicer/PLAYBACK-PROVENANCE.txt"
 install -m 644 "$FFMPEG_BUNDLE/COPYING.LGPLv2.1" \
     "$PACKAGE_DIR/share/slicer/COPYING.LGPLv2.1"
+install -m 644 "$FFMPEG_BUNDLE/COPYING.OPENH264" "$PACKAGE_DIR/share/slicer/COPYING.OPENH264"
 install -m 644 "$FFMPEG_BUNDLE/FFMPEG-NOTICE.txt" "$PACKAGE_DIR/share/slicer/FFMPEG-NOTICE.txt"
 if [[ -f "$FFMPEG_BUNDLE/ZLIB-NOTICE.txt" ]]; then
     install -m 644 "$FFMPEG_BUNDLE/ZLIB-NOTICE.txt" "$PACKAGE_DIR/share/slicer/ZLIB-NOTICE.txt"

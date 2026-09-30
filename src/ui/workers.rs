@@ -4,6 +4,18 @@ use super::*;
 
 impl SlicerApp {
     pub(super) fn poll_background(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(result) = self.update_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            self.update_rx = None;
+            self.available_update = result;
+            cx.notify();
+        }
+        if let Some(path) = self
+            .opened_files
+            .as_ref()
+            .and_then(|rx| rx.try_iter().last())
+        {
+            self.open_file(path, window, cx);
+        }
         self.poll_playback(cx);
         self.poll_crop();
         self.poll_export_toast();

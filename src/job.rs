@@ -202,6 +202,7 @@ impl Drop for JobHandle {
 }
 
 struct PreparedRequest {
+    source_bitrates: Option<SourceBitrates>,
     request: ExportRequest,
     input: PathBuf,
     output: PathBuf,
@@ -265,6 +266,7 @@ impl PreparedRequest {
 
         let temp = reserve_temp(&output_parent, output_name)?;
         Ok(Self {
+            source_bitrates: None,
             request,
             input,
             output,
@@ -354,6 +356,71 @@ fn validate_crop_bounds_only(crop: CropRect, source_width: u32, source_height: u
         );
     }
     Ok(())
+}
+
+#[derive(Clone, Copy)]
+struct SourceBitrates {
+    video: u64,
+    audio: u64,
+}
+
+impl Default for SourceBitrates {
+    fn default() -> Self {
+        Self {
+            video: 2_000_000,
+            audio: 128_000,
+        }
+    }
+}
+
+fn probe_source_bitrates(binaries: &Binaries, input: &Path) -> Option<SourceBitrates> {
+    let output = Command::new(&binaries.ffprobe)
+        .args([
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_type,bit_rate:format=duration,size,bit_rate",
+            "-of",
+            "json",
+            "--",
+        ])
+        .arg(input)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let document: Value = serde_json::from_slice(&output.stdout).ok()?;
+    source_bitrates(&document)
+}
+
+fn source_bitrates(document: &Value) -> Option<SourceBitrates> {
+    let positive = |value: Option<&Value>| probe_f64(value).filter(|n| n.is_finite() && *n > 0.0);
+    let streams = document.get("streams")?.as_array()?;
+    let video = streams.iter().find(|s| s["codec_type"] == "video")?;
+    let audio_rates: Vec<_> = streams
+        .iter()
+        .filter(|s| s["codec_type"] == "audio")
+        .filter_map(|s| positive(s.get("bit_rate")))
+        .collect();
+    let format = &document["format"];
+    let total_rate = positive(format.get("bit_rate"))
+        .or_else(|| Some(positive(format.get("size"))? * 8.0 / positive(format.get("duration"))?));
+    let video_rate = positive(video.get("bit_rate")).or_else(|| {
+        // Matroska often omits stream bitrates. Use the file's average budget,
+        // reserving known audio rates (or 128 kb/s per unknown audio track).
+        let audio_count = streams
+            .iter()
+            .filter(|s| s["codec_type"] == "audio")
+            .count();
+        let audio_total =
+            audio_rates.iter().sum::<f64>() + (audio_count - audio_rates.len()) as f64 * 128_000.0;
+        Some((total_rate? - audio_total).max(total_rate? * 0.25))
+    })?;
+    Some(SourceBitrates {
+        video: (video_rate as u64).clamp(32_000, 200_000_000),
+        audio: (audio_rates.first().copied().unwrap_or(128_000.0) as u64).clamp(32_000, 192_000),
+    })
 }
 
 const MAX_CROP_PROBE_DIAGNOSTIC_BYTES: usize = 16 * 1024;
@@ -612,7 +679,7 @@ fn listing_has_name(listing: &str, wanted: &str) -> bool {
 
 fn run_export(
     binaries: Binaries,
-    prepared: PreparedRequest,
+    mut prepared: PreparedRequest,
     sender: mpsc::Sender<JobEvent>,
     cancel_requested: Arc<AtomicBool>,
     child_slot: Arc<Mutex<Option<Child>>>,
@@ -666,6 +733,20 @@ fn run_export(
             send_event(&sender, JobEvent::Cancelled);
             return;
         }
+    }
+
+    if matches!(
+        prepared.request.format,
+        OutputFormat::Mp4 | OutputFormat::Mkv
+    ) && (prepared.request.mode == TrimMode::Exact || prepared.request.crop.is_some())
+    {
+        // Keep metadata probing on this worker, with no UI-thread process work.
+        prepared.source_bitrates = probe_source_bitrates(&binaries, &prepared.input);
+    }
+    if cancel_requested.load(Ordering::SeqCst) {
+        cleanup_temp(&prepared.temp);
+        send_event(&sender, JobEvent::Cancelled);
+        return;
     }
 
     let args = match build_args_with_gif_capabilities(&prepared, gif_capabilities) {
@@ -1016,23 +1097,43 @@ fn build_args_with_gif_capabilities(
                     args.extend([
                         // Preserve variable frame-rate timestamps during the
                         // decode/re-encode path. A 60 kHz time base is fine
-                        // for the native MPEG-4 encoder and gives sub-frame
+                        // for video encoders and gives sub-frame
                         // precision without overflowing its timestamp range.
                         OsString::from("-fps_mode"),
                         OsString::from("passthrough"),
                         OsString::from("-enc_time_base:v"),
                         OsString::from("1:60000"),
-                        OsString::from("-c:v"),
-                        OsString::from("mpeg4"),
-                        OsString::from("-q:v"),
-                        OsString::from(video_quality(request.quality).to_string()),
+                    ]);
+                    // Use the same software H.264 encoder and rate policy on
+                    // Linux, Windows, and macOS. Preserve 8-bit 4:2:0 playback compatibility.
+                    let source = prepared.source_bitrates.unwrap_or_default();
+                    let bitrate = source.video * u64::from(request.quality.clamp(50, 100)) / 100;
+                    args.extend(
+                        [
+                            "-c:v",
+                            "libopenh264",
+                            "-pix_fmt",
+                            "yuv420p",
+                            "-profile:v",
+                            "high",
+                            "-rc_mode",
+                            "bitrate",
+                        ]
+                        .into_iter()
+                        .map(OsString::from),
+                    );
+                    args.extend([
+                        OsString::from("-b:v"),
+                        OsString::from(bitrate.to_string()),
+                        OsString::from("-maxrate:v"),
+                        OsString::from((bitrate + bitrate / 5).to_string()),
                     ]);
                     if !request.mute_audio {
                         args.extend([
                             OsString::from("-c:a"),
                             OsString::from("aac"),
                             OsString::from("-b:a"),
-                            OsString::from("192k"),
+                            OsString::from(source.audio.to_string()),
                         ]);
                     }
                 }
@@ -1046,6 +1147,9 @@ fn build_args_with_gif_capabilities(
         }
     }
 
+    if request.format == OutputFormat::Mp4 {
+        args.extend([OsString::from("-movflags"), OsString::from("+faststart")]);
+    }
     args.extend([
         OsString::from("-avoid_negative_ts"),
         OsString::from("make_zero"),
@@ -1108,12 +1212,6 @@ fn parse_timestamp(value: &str) -> Option<f64> {
     Some(hours * 3600.0 + minutes * 60.0 + seconds)
 }
 
-fn video_quality(quality: u8) -> u8 {
-    let quality = u16::from(quality.min(100));
-    // Native MPEG-4 quantizers range from 1 (best) to 31 (worst).
-    (31 - ((quality * 30) / 100)) as u8
-}
-
 fn audio_quality(quality: u8) -> u8 {
     let quality = u16::from(quality.min(100));
     // libmp3lame's q:a scale ranges from 0 (best) to 9 (worst).
@@ -1164,10 +1262,18 @@ mod tests {
     }
 
     #[test]
-    fn quality_scales_to_native_mpeg4_quantizer() {
-        assert_eq!(video_quality(0), 31);
-        assert_eq!(video_quality(100), 1);
-        assert_eq!(video_quality(255), 1);
+    fn source_budget_separates_video_from_high_bitrate_audio() {
+        let document = serde_json::json!({"streams": [
+            {"codec_type": "video", "bit_rate": "284977"},
+            {"codec_type": "audio", "bit_rate": "512000"}
+        ], "format": {"bit_rate": "800487"}});
+        let budget = source_bitrates(&document).unwrap();
+        assert_eq!(budget.video, 284977);
+        assert_eq!(budget.audio, 192000);
+        let document = serde_json::json!({"streams": [
+            {"codec_type": "video"}, {"codec_type": "audio", "bit_rate": "128000"}
+        ], "format": {"size": "1000000", "duration": "10"}});
+        assert_eq!(source_bitrates(&document).unwrap().video, 672000);
     }
 
     #[test]
@@ -1266,6 +1372,7 @@ mod tests {
     #[test]
     fn crop_forces_exact_video_encoding_and_emits_filter() {
         let prepared = PreparedRequest {
+            source_bitrates: None,
             request: ExportRequest {
                 input: PathBuf::from("input.mp4"),
                 output: PathBuf::from("output.mp4"),
@@ -1302,7 +1409,7 @@ mod tests {
         );
         assert!(
             args.windows(2)
-                .any(|window| { window == ["-c:v".to_owned(), "mpeg4".to_owned()] })
+                .any(|window| { window == ["-c:v".to_owned(), "libopenh264".to_owned(),] })
         );
         let input_index = args.iter().position(|arg| arg == "-i").unwrap();
         let seek_index = args.iter().position(|arg| arg == "-ss").unwrap();
@@ -1320,6 +1427,7 @@ mod tests {
 
     fn prepared_request(format: OutputFormat) -> PreparedRequest {
         PreparedRequest {
+            source_bitrates: None,
             request: ExportRequest {
                 input: PathBuf::from("input.mp4"),
                 output: PathBuf::from("output").with_extension(format.extension()),

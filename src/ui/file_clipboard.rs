@@ -1,5 +1,7 @@
 //! File clipboard ownership, including Linux file-manager MIME formats.
-use std::{path::PathBuf, sync::mpsc, thread, time::Duration};
+#[cfg(target_os = "linux")]
+use std::time::Duration;
+use std::{path::PathBuf, sync::mpsc, thread};
 
 pub(super) struct FileClipboard {
     _keep_alive: mpsc::Sender<()>,
@@ -138,7 +140,7 @@ fn own_clipboard(
     };
     run().map_err(|e| e.to_string())
 }
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn own_clipboard(
     _: PathBuf,
     _: mpsc::Receiver<()>,
@@ -239,5 +241,82 @@ mod tests {
             file_uri(std::path::Path::new("/tmp/a #日本.mp4")),
             "file:///tmp/a%20%23%E6%97%A5%E6%9C%AC.mp4"
         );
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn own_clipboard(
+    path: PathBuf,
+    _: mpsc::Receiver<()>,
+    result: &mpsc::Sender<Result<(), String>>,
+) -> Result<(), String> {
+    objc2::rc::autoreleasepool(|_| {
+        write_file_url(&path, &objc2_app_kit::NSPasteboard::generalPasteboard())?;
+        let _ = result.send(Ok(()));
+        Ok(())
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn write_file_url(
+    path: &std::path::Path,
+    pasteboard: &objc2_app_kit::NSPasteboard,
+) -> Result<(), String> {
+    use objc2::runtime::ProtocolObject;
+    use objc2_app_kit::NSPasteboardWriting;
+    use objc2_foundation::{NSArray, NSURL};
+    use std::{ffi::CString, os::unix::ffi::OsStrExt};
+    let path = std::fs::canonicalize(path).map_err(|e| e.to_string())?;
+    let path = CString::new(path.as_os_str().as_bytes()).map_err(|e| e.to_string())?;
+    let url = unsafe {
+        NSURL::fileURLWithFileSystemRepresentation_isDirectory_relativeToURL(
+            std::ptr::NonNull::new(path.as_ptr().cast_mut()).unwrap(),
+            false,
+            None,
+        )
+    };
+    let objects =
+        NSArray::from_slice(&[ProtocolObject::<dyn NSPasteboardWriting>::from_ref(&*url)]);
+    pasteboard.clearContents();
+    if !pasteboard.writeObjects(&objects) {
+        return Err("macOS pasteboard rejected the exported file".to_owned());
+    }
+    Ok(())
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_tests {
+    #[test]
+    fn clipboard_points_to_the_complete_exported_file() {
+        use objc2_app_kit::NSPasteboard;
+        use objc2_foundation::{NSURL, ns_string};
+        use std::{
+            ffi::{CStr, OsStr},
+            os::unix::{ffi::OsStrExt, fs::MetadataExt},
+        };
+        objc2::rc::autoreleasepool(|_| {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("clip café 日本.mp4");
+            let video = b"complete video bytes, not a thumbnail";
+            std::fs::write(&path, video).unwrap();
+            let pasteboard = NSPasteboard::pasteboardWithUniqueName();
+            super::write_file_url(&path, &pasteboard).unwrap();
+            let value = pasteboard
+                .stringForType(ns_string!("public.file-url"))
+                .unwrap();
+            let url = NSURL::URLWithString(&value).unwrap();
+            assert!(url.isFileURL());
+            let bytes = unsafe { CStr::from_ptr(url.fileSystemRepresentation().as_ptr()) };
+            let copied_path = std::path::PathBuf::from(OsStr::from_bytes(bytes.to_bytes()));
+            // NSURL normalizes Unicode filenames on macOS; compare file identity.
+            let copied = std::fs::metadata(&copied_path).unwrap();
+            let original = std::fs::metadata(&path).unwrap();
+            assert_eq!(
+                (copied.dev(), copied.ino()),
+                (original.dev(), original.ino())
+            );
+            assert_eq!(std::fs::read(copied_path).unwrap(), video);
+            pasteboard.clearContents();
+        });
     }
 }

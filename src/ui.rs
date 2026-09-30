@@ -47,6 +47,9 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 
+#[cfg(target_os = "macos")]
+actions!(slicer, [OpenVideo, Quit]);
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
     Home,
@@ -92,6 +95,9 @@ enum DialogKind {
 /// The application view.  All receivers are polled from a lightweight GPUI
 /// timer so no filesystem or FFmpeg call can hold up a frame.
 pub struct SlicerApp {
+    update_rx: Option<mpsc::Receiver<Option<slicer::updates::AvailableUpdate>>>,
+    available_update: Option<slicer::updates::AvailableUpdate>,
+    opened_files: Option<mpsc::Receiver<PathBuf>>,
     binaries: Option<media::Binaries>,
     binaries_error: Option<String>,
     screen: Screen,
@@ -225,6 +231,9 @@ impl SlicerApp {
         let settings_rx = spawn_settings_load();
         let thumbnail_worker = binaries.clone().map(preview::PreviewWorker::new);
         let mut app = Self {
+            update_rx: Some(slicer::updates::spawn_check()),
+            available_update: None,
+            opened_files: None,
             binaries: binaries.clone(),
             binaries_error,
             screen: Screen::Home,
@@ -425,48 +434,93 @@ pub fn run(initial_file: Option<PathBuf>) {
     let binaries_error = binaries.is_none().then(|| {
         "Bundled FFmpeg was not found. Set SLICER_FFMPEG_DIR for development or install the packaged codecs.".to_owned()
     });
-    platform::application()
-        .with_assets(gpui_kit::assets::AllAssets)
-        .run(move |cx| {
-            gpui_kit::init(cx);
-            theme::apply(cx);
-            let options = WindowOptions {
-                window_bounds: Some(WindowBounds::centered(size(px(800.), px(720.)), cx)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Slicer".into()),
-                    ..TitlebarOptions::default()
-                }),
-                window_min_size: Some(size(px(580.), px(600.))),
-                #[cfg(target_os = "linux")]
-                window_decorations: Some(WindowDecorations::Client),
-                #[cfg(feature = "desktop")]
-                icon: app_icon(),
-                app_id: Some("com.slicer.Slicer".to_owned()),
-                window_background: WindowBackgroundAppearance::Transparent,
-                ..WindowOptions::default()
-            };
-            cx.open_window(options, move |window, cx| {
-                let view = cx.new(|cx| {
-                    let mut app =
-                        SlicerApp::new(window, cx, binaries.clone(), binaries_error.clone());
-                    if let Some(path) = initial_file.clone() {
-                        app.open_file(path, window, cx);
-                    }
-                    app
-                });
-                let closing_view = view.downgrade();
-                window.on_window_should_close(cx, move |_, cx| {
-                    let _ = closing_view.update(cx, |this, _| this.native.shutdown());
-                    true
-                });
-                cx.new(|cx| {
-                    Root::new(view, window, cx)
-                        .bordered(false)
-                        .bg(transparent_black())
+    let (open_tx, open_rx) = mpsc::channel();
+    let application = platform::application().with_assets(gpui_kit::assets::AllAssets);
+    #[cfg(target_os = "macos")]
+    application.on_open_urls(move |urls| {
+        use objc2_foundation::{NSString, NSURL};
+        use std::{ffi::CStr, os::unix::ffi::OsStrExt};
+        for url in urls {
+            if let Some(url) = NSURL::URLWithString(&NSString::from_str(&url))
+                && url.isFileURL()
+            {
+                let bytes = unsafe { CStr::from_ptr(url.fileSystemRepresentation().as_ptr()) };
+                let _ = open_tx.send(PathBuf::from(std::ffi::OsStr::from_bytes(bytes.to_bytes())));
+            }
+        }
+    });
+    #[cfg(not(target_os = "macos"))]
+    let _open_tx = open_tx;
+    application.run(move |cx| {
+        gpui_kit::init(cx);
+        theme::apply(cx);
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::centered(size(px(800.), px(720.)), cx)),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Slicer".into()),
+                ..TitlebarOptions::default()
+            }),
+            window_min_size: Some(size(px(580.), px(600.))),
+            #[cfg(target_os = "linux")]
+            window_decorations: Some(WindowDecorations::Client),
+            #[cfg(feature = "desktop")]
+            icon: app_icon(),
+            app_id: Some("com.slicer.Slicer".to_owned()),
+            window_background: if cfg!(target_os = "macos") {
+                WindowBackgroundAppearance::Opaque
+            } else {
+                WindowBackgroundAppearance::Transparent
+            },
+            ..WindowOptions::default()
+        };
+        cx.open_window(options, move |window, cx| {
+            let view = cx.new(|cx| {
+                let mut app = SlicerApp::new(window, cx, binaries.clone(), binaries_error.clone());
+                app.opened_files = Some(open_rx);
+                if let Some(path) = initial_file.clone() {
+                    app.open_file(path, window, cx);
+                }
+                app
+            });
+            #[cfg(target_os = "macos")]
+            {
+                let quitting_view = view.downgrade();
+                cx.on_app_quit(move |cx| {
+                    let _ = quitting_view.update(cx, |this, _| this.native.shutdown());
+                    async {}
                 })
+                .detach();
+                cx.on_action(|_: &Quit, cx| cx.quit());
+                let opening_view = view.downgrade();
+                let opening_window = window.window_handle();
+                cx.on_action(move |_: &OpenVideo, cx| {
+                    let _ = opening_window.update(cx, |_, _, cx| {
+                        let _ =
+                            opening_view.update(cx, |this, _| this.launch_dialog(DialogKind::Open));
+                    });
+                });
+                cx.bind_keys([
+                    KeyBinding::new("cmd-q", Quit, None),
+                    KeyBinding::new("cmd-o", OpenVideo, None),
+                ]);
+                cx.set_menus([
+                    Menu::new("Slicer").items([MenuItem::action("Quit Slicer", Quit)]),
+                    Menu::new("File").items([MenuItem::action("Open Video…", OpenVideo)]),
+                ]);
+            }
+            let closing_view = view.downgrade();
+            window.on_window_should_close(cx, move |_, cx| {
+                let _ = closing_view.update(cx, |this, _| this.native.shutdown());
+                true
+            });
+            cx.new(|cx| {
+                Root::new(view, window, cx)
+                    .bordered(false)
+                    .bg(transparent_black())
             })
-            .expect("failed to open Slicer window");
-        });
+        })
+        .expect("failed to open Slicer window");
+    });
 }
 
 /// The same checked-in image is used for the native X11 window icon and the

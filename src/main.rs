@@ -1,7 +1,9 @@
 use anyhow::{Context, Result, bail};
 #[cfg(feature = "desktop")]
 use slicer::home;
-use slicer::{job, media, preview, waveform};
+#[cfg(feature = "desktop")]
+use slicer::waveform;
+use slicer::{job, media, preview};
 #[cfg(feature = "desktop")]
 mod ui;
 

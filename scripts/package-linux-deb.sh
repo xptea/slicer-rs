@@ -221,8 +221,9 @@ fi
     exit 1
 }
 
-if [[ ! -x "$FFMPEG_BUNDLE/bin/ffmpeg" || ! -x "$FFMPEG_BUNDLE/bin/ffprobe" ]]; then
-    printf 'FFmpeg bundle is absent; building the pinned source profile\n'
+if [[ ! -x "$FFMPEG_BUNDLE/bin/ffmpeg" || ! -x "$FFMPEG_BUNDLE/bin/ffprobe" ]] ||
+    ! "$FFMPEG_BUNDLE/bin/ffmpeg" -hide_banner -encoders 2>/dev/null | awk '$2 == "libopenh264" { found=1 } END { exit !found }'; then
+    printf 'FFmpeg bundle is absent or stale; building the pinned source profile\n'
     BUILD_ARGS=(--target "linux-$ARCH" --output "$FFMPEG_BUNDLE")
     [[ -n "$JOBS" ]] && BUILD_ARGS+=(--jobs "$JOBS")
     "$ROOT_DIR/scripts/build-ffmpeg.sh" "${BUILD_ARGS[@]}"
@@ -233,7 +234,9 @@ for program in ffmpeg ffprobe; do
         exit 1
     }
 done
-for notice in COPYING.LGPLv2.1 FFMPEG-NOTICE.txt; do
+"$ROOT_DIR/scripts/verify-export-bundle.sh" "$FFMPEG_BUNDLE"
+
+for notice in COPYING.LGPLv2.1 COPYING.OPENH264 FFMPEG-NOTICE.txt; do
     [[ -f "$FFMPEG_BUNDLE/$notice" ]] || {
         printf 'error: FFmpeg notice is missing: %s\n' "$FFMPEG_BUNDLE/$notice" >&2
         exit 1
@@ -263,6 +266,7 @@ install -m 644 "$ROOT_DIR/LICENSE" "$PAYLOAD_DIR/share/slicer/LICENSE"
 install -m 644 "$ROOT_DIR/packaging/COMBINED-DISTRIBUTION-NOTICE.txt" \
     "$PAYLOAD_DIR/share/slicer/COMBINED-DISTRIBUTION-NOTICE.txt"
 install -m 644 "$FFMPEG_BUNDLE/COPYING.LGPLv2.1" "$PAYLOAD_DIR/share/slicer/COPYING.LGPLv2.1"
+install -m 644 "$FFMPEG_BUNDLE/COPYING.OPENH264" "$PAYLOAD_DIR/share/slicer/COPYING.OPENH264"
 install -m 644 "$FFMPEG_BUNDLE/FFMPEG-NOTICE.txt" "$PAYLOAD_DIR/share/slicer/FFMPEG-NOTICE.txt"
 if [[ -f "$FFMPEG_BUNDLE/ZLIB-NOTICE.txt" ]]; then
     install -m 644 "$FFMPEG_BUNDLE/ZLIB-NOTICE.txt" "$PAYLOAD_DIR/share/slicer/ZLIB-NOTICE.txt"

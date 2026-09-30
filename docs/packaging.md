@@ -62,7 +62,7 @@ corresponding macOS app Resources directory):
 
 * the exact source archive and `source/PROVENANCE.txt`;
 * the archive signature and release key when they were available to the build;
-* the extracted `COPYING.LGPLv2.1` and `FFMPEG-NOTICE.txt`;
+* the extracted `COPYING.LGPLv2.1`, `COPYING.OPENH264`, and `FFMPEG-NOTICE.txt`;
 * the zlib notice used by the PNG preview path; and
 * the Rust dependency notices collected by
   `tools/collect-rust-notices.py`.
@@ -83,11 +83,11 @@ assembler, linker, SDK, and the temporary build prefix can change the output.
 
 ## Codec profile
 
-The profile is intentionally small and uses FFmpeg's native codecs:
+The profile uses FFmpeg native codecs plus pinned, statically compiled OpenH264:
 
 | Capability | Included components |
 | --- | --- |
-| Exact video export | native MPEG-4 Part 2 encoder |
+| Exact video export | OpenH264 H.264 encoder, identical on Linux/Windows/macOS |
 | GIF export | native GIF muxer/encoder with `fps`, `split`, `palettegen`, and `paletteuse` |
 | Exact audio export | native AAC encoder and PCM encoders |
 | Decode | H.264, HEVC, MPEG-1/2/4, MJPEG, VP8/VP9, AAC, AC-3, FLAC, MP3, Opus, Vorbis, and PCM |
@@ -100,7 +100,9 @@ that is not in this bundle. GIF export uses FFmpeg's native GIF encoder and
 the palette generation/use filters listed above, so it does not add an
 external codec or GPL component. FFmpeg's [general documentation](https://www.ffmpeg.org/general.html)
 describes libmp3lame and libvpx as external encoder libraries. They are not
-silently picked up from a host installation. x264 is likewise omitted because
+silently picked up from a host installation. OpenH264 2.6.0 is built from the
+pinned BSD-2-Clause source archive, included with its license in every portable
+bundle. It requires a C++ toolchain and pkg-config at build time. x264 is omitted because
 FFmpeg documents it as GPL; adding it would change the license profile.
 
 ## Linux native playback runtime
@@ -216,7 +218,7 @@ Windows builds need a MinGW cross compiler (the default prefix is
 `x86_64-w64-mingw32-`). Set `SLICER_FFMPEG_CC`,
 `SLICER_FFMPEG_CROSS_PREFIX`, `SLICER_FFMPEG_CFLAGS`, or
 `SLICER_FFMPEG_LDFLAGS` for a target toolchain. The script still verifies the
-same source hash and rejects GPL/nonfree/external codec flags.
+same source hashes and rejects GPL/nonfree/unapproved codec flags.
 
 ## Linux package
 
@@ -288,7 +290,7 @@ runtime dependencies such as `libc`, `libm`, `libz`, and the ELF loader when
 checked with `ldd`. The presence of a host `ffmpeg` package is neither needed
 nor used. The playback closure's `DT_RUNPATH=$ORIGIN` keeps its FFmpeg 8
 shared-library ABI private to libmpv; the export tools remain the independent
-static FFmpeg 7.1.5 build. The package's `slicer-source/` directory contains
+static FFmpeg 7.1.5/OpenH264 build. The package's `slicer-source/` directory contains
 the application source snapshot (excluding build/, dist/, target/, .git, and
 userfiles) alongside the MIT notice.
 
@@ -328,30 +330,70 @@ output is never overwritten.
 
 ## macOS package
 
-On a macOS host, build the matching FFmpeg target and package an app bundle.
-Use `macos-aarch64` on Apple Silicon or `macos-x86_64` on Intel:
+Build on the matching macOS architecture (Apple Silicon or Intel). The complete
+build command produces the desktop release, native `.icns` icon, private runtimes,
+app bundle, tar archive, and a DMG with an Applications shortcut:
 
 ```sh
-scripts/build-ffmpeg.sh --target macos-aarch64 --verify-signature --jobs 4
-scripts/package-macos.sh \
-  --binary target/release/slicer \
-  --ffmpeg-bundle build/ffmpeg/macos-aarch64 \
-  --rust-notices build/rust-notices
+scripts/build-macos.sh --libmpv /opt/homebrew/lib/libmpv.2.dylib --development
+scripts/smoke-macos-bundle.sh dist/slicer-macos-aarch64/Slicer.app
 ```
 
-The script writes `Slicer.app` inside `dist/slicer-macos-*` and creates a tar
-archive. Because Slicer's executable-relative fallback is
-`../lib/slicer/bin`, the app uses:
+The explicit libmpv path is only a build input. The installed app resolves
+`Contents/lib/slicer/playback/libmpv.2.dylib` and does not use Homebrew or PATH.
+`bundle-playback-macos.py` follows the full Mach-O dependency closure, checks CPU
+architecture, replaces non-system load paths with `@loader_path`, and signs the
+modified libraries. Apple system frameworks and `/usr/lib` libraries stay on the
+host. The separate static FFmpeg export/thumbnail tools are still built from the
+pinned source profile and resolve from `Contents/lib/slicer/bin`.
 
 ```text
 Slicer.app/Contents/MacOS/slicer
 Slicer.app/Contents/lib/slicer/bin/{ffmpeg,ffprobe}
-Slicer.app/Contents/Resources/slicer/{source,notices,rust-notices}
+Slicer.app/Contents/lib/slicer/playback/{libmpv.2.dylib,private dylibs,notices,source}
+Slicer.app/Contents/Resources/Slicer.icns
+Slicer.app/Contents/Resources/slicer/{ffmpeg-source,notices,rust-notices}
 ```
 
-Use `SLICER_MACOS_ARCH=arm64` or `x86_64` when preparing a cross-target app.
-The script consumes only an explicit verified bundle and never copies a
-system FFmpeg.
+Playback notices include installed Homebrew license files, receipts, build
+formulas, SBOMs, and input hashes. Put the exact corresponding source archives
+and build/patch materials for each copied formula into
+`packaging/playback-source/macos/<formula>-<installed-version>/`. The source
+manifest records their hashes. A release without those materials fails; the
+explicit `--development` option permits MISSING rows for local testing. A custom
+non-Homebrew runtime requires its own complete source/license provenance.
+Source presence and hashes are recorded, but publishers must verify the materials
+are the complete corresponding sources for their binaries.
+
+`build-macos.sh` backs up previous generated outputs under `dist/previous/` before
+replacing them, so `dist/slicer-macos-aarch64/Slicer.app` and the matching DMG always
+contain the latest completed build. Intel builds use `macos-x86_64`. The lower-level
+`package-macos.sh` accepts `--binary`, `--ffmpeg-bundle`, `--playback-bundle`, and
+`--dmg`; it rejects wrong-architecture or incomplete runtime layouts.
+
+### Signing, notarization, and Gatekeeper
+
+By default the script uses ad hoc signatures, requiring no Apple subscription.
+This makes a local build runnable, but downloaded copies still require manual
+approval on the destination Mac. Quarantine is attached by the downloading app;
+removing it while building cannot bake a Gatekeeper bypass into the DMG.
+
+For distribution with default Gatekeeper settings, use a valid Developer ID
+Application certificate and a previously saved notarytool keychain profile:
+
+```sh
+scripts/build-macos.sh \
+  --playback-bundle build/playback/macos-aarch64 \
+  --sign-identity 'Developer ID Application: Name (TEAMID)' \
+  --notary-profile slicer-notary
+```
+
+Nested dylibs and executables are signed inside out with the hardened runtime and
+secure timestamps. The script notarizes and staples the app, builds and signs the
+DMG, then notarizes/staples the DMG and verifies Gatekeeper acceptance. It stops
+on signing, notarization, or assessment errors. Credentials stay in the macOS
+keychain; passwords and API keys are never script arguments.
+See Apple's [notarization workflow](https://developer.apple.com/documentation/security/customizing-the-notarization-workflow).
 
 ## Windows package
 
@@ -379,3 +421,78 @@ share/slicer/{ffmpeg-source,rust-notices,notices}
 requires the source/provenance/notice materials. It can invoke the checked-in
 POSIX build script through `bash` when a bundle is absent, but it never uses a
 host `ffmpeg.exe` as a release input.
+
+The macOS packager derives `LSMinimumSystemVersion` from the app and every
+bundled executable and dylib. Supplying a Homebrew playback library built for
+a recent macOS version raises the bundle minimum accordingly. To support older
+macOS releases, supply a libmpv closure built for those releases; setting the
+app deployment target alone cannot lower its dependencies’ requirements.
+
+Every platform packager checks for `libopenh264` and the pinned OpenH264 source
+archive/license. Stale MPEG-4-only export bundles are rebuilt or rejected rather
+than being packaged with application code that expects H.264. Software export
+uses one encoder and source-derived bitrate policy on all targets; GPU playback
+continues to use each platform’s native libmpv surface.
+
+## Release automation and update feed
+
+`.github/workflows/release.yml` runs for `release: published` only. There is no
+push or pull-request trigger. Stable `vMAJOR.MINOR.PATCH` releases build natively
+on Ubuntu 24.04 x86_64/ARM64 and macOS 15 Intel/Apple Silicon. Version validation,
+all application/media tests, source collection, runtime relocation, package
+smoke checks and macOS signature/DMG checks must pass before the publish job
+uploads any assets. Rerunning a failed release workflow replaces that release's
+asset filenames. Prereleases skip the production build and updater.
+
+The Linux job enables distro source repositories and downloads the exact
+`.dsc`/upstream/distro archives named by the copied ELF dependency inventory.
+The strict Linux bundler checks their versions, sizes and SHA-256 hashes.
+The macOS job reads the saved installed Homebrew formulas, source recipes,
+resources and patch SBOMs. It downloads checksum-verified archives and exact
+Git revisions, including submodules, and verifies the complete collected source
+indexes when bundling. Its source cache can also be prepared locally:
+
+```sh
+python3 scripts/collect-playback-sources.py macos \
+  build/playback/macos-aarch64 packaging/playback-source/macos
+python3 scripts/bundle-playback-macos.py \
+  --libmpv /opt/homebrew/lib/libmpv.2.dylib \
+  --output build/playback-release/macos-aarch64 \
+  --source-cache packaging/playback-source/macos --require-source-index
+scripts/build-macos.sh --playback-bundle build/playback-release/macos-aarch64
+```
+
+Release filenames are stable, with the version in the GitHub release tag:
+
+| Platform | Downloads |
+| --- | --- |
+| Apple Silicon | `slicer-macos-aarch64.dmg`, `.tar.gz` |
+| Intel Mac | `slicer-macos-x86_64.dmg`, `.tar.gz` |
+| Linux x86_64 | `slicer-linux-x86_64.tar.gz`, `.deb` |
+| Linux ARM64 | `slicer-linux-aarch64.tar.gz`, `.deb` |
+
+Each release also receives `version.json` and `SHA256SUMS.txt`. Update
+`Cargo.toml`, `Cargo.lock` and the root `version.json` together on `main`, then
+publish a release tagged `v` plus that version from the same commit. The app
+fetches `https://raw.githubusercontent.com/xptea/slicer-rs/main/version.json`
+once per launch with a 10-second request timeout and bounded response sizes.
+It compares semantic versions, ignores prereleases/drafts, and checks the latest
+GitHub release for a completely uploaded, nonempty asset of the matching version
+and OS/CPU. Home then offers a Download button which opens that exact GitHub asset.
+The app does not download or replace its executable automatically. Settings
+always displays the compiled local package version. The repository and releases
+must be public; credentials are never embedded in the app.
+
+The default release workflow uses account-free ad hoc macOS signing. It removes
+build-machine extended attributes before signing and includes
+`packaging/MACOS-INSTALL.txt` inside the DMG. A recipient's browser can apply
+quarantine again: a DMG cannot remove Gatekeeper requirements on another Mac.
+The instructions explain one-time approval for this app, including the targeted
+quarantine command if Privacy & Security does not offer Open Anyway. Developer
+ID and notarization remain optional through the macOS scripts' existing
+`--sign-identity` / `--notary-profile` flags.
+
+Local builds inherit the minimum macOS version of their playback dependencies.
+Building on a newer Mac with newer Homebrew bottles can require a newer macOS
+than the hosted release build; the packager computes this requirement and writes
+it to `LSMinimumSystemVersion` rather than claiming unsupported compatibility.

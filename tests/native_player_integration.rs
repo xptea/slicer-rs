@@ -317,3 +317,30 @@ fn invalid_input_is_rejected_before_mpv_command() {
     assert!(error.contains("unable to read media file"));
     assert!(!player.poll().loaded);
 }
+
+#[test]
+fn rapid_scrubbing_settles_at_the_latest_release_target() {
+    let Some((player, path)) = native_test_player() else {
+        eprintln!("libmpv or native fixture unavailable; skipping");
+        return;
+    };
+    player.load_file(&path, 0.0, 4.5).unwrap();
+    assert!(wait_until(&player, Duration::from_secs(5), |s| s.loaded));
+    for i in 0..40 {
+        player.seek(0.2 + (i % 11) as f64 * 0.25, false).unwrap();
+        thread::sleep(Duration::from_millis(12));
+    }
+    player.seek(3.2, true).unwrap();
+    assert!(
+        wait_until(&player, Duration::from_secs(4), |s| {
+            !s.seeking && (s.position - 3.2).abs() < 0.08
+        }),
+        "latest release did not settle: {:?}",
+        player.snapshot()
+    );
+    // Releasing again at the same target must preserve that presented frame.
+    player.seek(3.2, true).unwrap();
+    assert!(wait_until(&player, Duration::from_secs(1), |s| !s.seeking));
+    assert!(player.snapshot().paused);
+    assert!(player.snapshot().error.is_none());
+}

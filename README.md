@@ -1,6 +1,6 @@
 # Slicer
 
-Native Linux video trimming toolbox built with GPUI Kit. FFmpeg and ffprobe ship
+Native Linux and macOS video trimming toolbox built with GPUI Kit. FFmpeg and ffprobe ship
 beside the application; installed builds never search `PATH` for media tools.
 The 800 × 720 Home window has a full dashed drop area with a centered open button and up to three recent-video thumbnails.
 
@@ -8,6 +8,41 @@ The 800 × 720 Home window has a full dashed drop area with a centered open butt
 
 Extract `dist/slicer-linux-x86_64-native.tar.gz`, keep the whole folder together, and run
 `bin/slicer` inside it. Choose your recordings folder in **Settings**.
+
+## Run and build on macOS
+
+Open `dist/slicer-macos-aarch64/Slicer.app` on Apple Silicon, or drag it from
+`dist/slicer-macos-aarch64.dmg` to Applications. Intel builds use `macos-x86_64`.
+The app includes its icon, FFmpeg/ffprobe, and the private libmpv dependency closure.
+No Homebrew installation is required on the destination Mac.
+
+For development, select the media runtimes explicitly:
+
+```sh
+SLICER_FFMPEG_DIR="$PWD/build/ffmpeg/macos-aarch64/bin" \
+SLICER_MPV_LIBRARY=/opt/homebrew/lib/libmpv.2.dylib cargo run --locked
+```
+
+Build the full desktop app and DMG on the matching architecture:
+
+```sh
+scripts/build-macos.sh --libmpv /opt/homebrew/lib/libmpv.2.dylib --development
+scripts/smoke-macos-bundle.sh dist/slicer-macos-aarch64/Slicer.app
+```
+
+`--development` permits a local playback bundle without all corresponding source
+archives. Source-complete releases omit that flag and provide the exact source
+materials described in [packaging instructions](docs/packaging.md).
+Ad hoc signing needs no Apple account. Downloads on other Macs still require
+manual approval in macOS Privacy & Security. For distribution under default
+Gatekeeper settings, pass `--sign-identity` and `--notary-profile`; the script
+signs, notarizes, and staples both the app and DMG. Removing quarantine metadata
+on the build machine cannot prevent macOS adding it when someone downloads a copy.
+
+macOS playback uses the same libmpv engine through its OpenGL render API in an
+input-transparent AppKit view, with VideoToolbox decoding and software fallback.
+Exports use the separate bundled FFmpeg tool pair, with H.264/AAC video through the same OpenH264 encoder on all platforms. The native window supplies its
+own corners and title bar; Slicer adds no second rounded window border.
 
 ## Build and run
 
@@ -38,6 +73,35 @@ optional player, streaming, DVD, scripting, and alternate backend features.
 
 ## Workflow
 
+Home checks the public project's raw `version.json` once on launch, outside the
+UI thread. When a newer stable GitHub release has an uploaded asset for your
+operating system and CPU, Home shows its version and a **Download** button.
+The button opens that release's DMG on macOS or portable archive on Linux.
+Offline checks do not interrupt editing. Settings shows the installed version.
+
+## Publishing releases
+
+The [release workflow](.github/workflows/release.yml) runs only when a GitHub
+release is published, never on pushes. It builds Linux x86_64/ARM64 and macOS
+Intel/Apple Silicon, tests the bundled runtimes, and uploads DMGs, portable
+archives, Debian packages and SHA-256 checksums after every build succeeds.
+macOS builds run on macOS 15; Ubuntu builds run on Ubuntu 24.04 (X11/XWayland).
+The exact minimum macOS requirement is recorded from the bundled binaries.
+
+For each stable release, set the same version in `Cargo.toml` and `version.json`,
+update `Cargo.lock`, and commit those changes to `main`. Publish a GitHub release
+tagged `v` plus that version, for example `v0.1.0`, from that commit. Release
+validation rejects mismatched tags. A failed run can be rerun from Actions; it
+replaces assets for the same release. Prereleases do not advertise app updates.
+The repository and releases must be public for anonymous update checks.
+
+Builds need no Apple subscription and use ad hoc signatures. The DMG includes
+[installation instructions](packaging/MACOS-INSTALL.txt) for approving Slicer
+on another Mac. To avoid that one-time approval, Developer ID signing and
+notarization are supported by the macOS scripts.
+
+## Editing videos
+
 Choose a video folder in Settings. Home shows the three most recently modified
 videos as cards with first-frame images; click a card to open an edit. The folder
 choice persists across launches. Home refreshes every five seconds while open.
@@ -62,7 +126,7 @@ exports remove their temporary output.
 
 - **Fast cut:** copies compressed streams. Boundaries may move to nearby keyframes.
 - **Exact cut:** decodes and encodes to place the boundaries precisely; takes longer.
-- The initial native FFmpeg profile encodes MPEG-4/AAC in MP4 or MKV, and PCM WAV.
+- Exact video exports use the bundled OpenH264 encoder and AAC on Linux, Windows, and macOS. Quality scales the source bitrate budget; 100% does not request unbounded quality. MP4 metadata comes first for embedded playback. WAV uses PCM.
   Fast cuts keep the source codecs when the destination container supports them.
 - Linux preview uses a persistent libmpv player in a native GPU-rendered surface,
   with audio, source-rate playback, and coalesced seeking. Hardware decoding is
@@ -74,7 +138,7 @@ exports remove their temporary output.
   Set `SLICER_PREWARM=1` to trade higher idle memory for the shortest possible
   first-open latency.
 - Wayland desktops use XWayland for this embedded surface. Native Wayland and
-  other-platform video surfaces require separate integration and validation.
+  Windows video surfaces require separate integration and validation.
 - Batch exports, hardware encoding, and multiple cut segments are deferred.
 
 ## Command-line verification

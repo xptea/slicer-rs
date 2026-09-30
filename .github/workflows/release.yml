@@ -1,0 +1,153 @@
+name: Release Linux and macOS
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event.release.tag_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: ${{ !github.event.release.prerelease }}
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux
+            target: linux-x86_64
+          - runner: ubuntu-24.04-arm
+            platform: linux
+            target: linux-aarch64
+          - runner: macos-15
+            platform: macos
+            target: macos-aarch64
+          - runner: macos-15-intel
+            platform: macos
+            target: macos-x86_64
+    env:
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+      TARGET: ${{ matrix.target }}
+      PLATFORM: ${{ matrix.platform }}
+      CARGO_TERM_COLOR: always
+      MACOSX_DEPLOYMENT_TARGET: '15.0'
+      SLICER_MACOS_DEPLOYMENT_TARGET: '15.0'
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Validate release version
+        run: python3 scripts/check-release-version.py --tag "$RELEASE_TAG"
+      - name: Install Linux build dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang cmake pkg-config nasm python3 patchelf dpkg-dev libmpv2 libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libfontconfig1-dev libfreetype6-dev libvulkan-dev libssl-dev libzstd-dev zlib1g-dev libasound2-dev xvfb mesa-vulkan-drivers libegl1-mesa-dev libgl1-mesa-dev
+      - name: Install macOS build dependencies
+        if: matrix.platform == 'macos'
+        run: brew install mpv pkgconf nasm
+      - name: Build pinned export runtime
+        run: scripts/build-ffmpeg.sh --target "$TARGET" --output "build/ffmpeg/$TARGET"
+      - name: Inventory playback runtime and collect corresponding sources
+        shell: bash
+        run: |
+          if [[ "$PLATFORM" == macos ]]; then
+            python3 scripts/bundle-playback-macos.py --libmpv "$(brew --prefix mpv)/lib/libmpv.2.dylib" --output build/playback-inventory --allow-missing-sources
+            python3 scripts/collect-playback-sources.py macos build/playback-inventory build/playback-source
+            python3 scripts/bundle-playback-macos.py --libmpv "$(brew --prefix mpv)/lib/libmpv.2.dylib" --output "build/playback/$TARGET" --source-cache build/playback-source --require-source-index
+          else
+            scripts/bundle-playback-linux.sh --output build/playback-inventory --allow-missing-sources
+            python3 scripts/collect-playback-sources.py linux build/playback-inventory build/playback-source
+            scripts/bundle-playback-linux.sh --output "build/playback/$TARGET" --source-cache build/playback-source
+          fi
+      - name: Test application and bundled media
+        shell: bash
+        run: |
+          export SLICER_FFMPEG_DIR="$PWD/build/ffmpeg/$TARGET/bin"
+          export SLICER_TEST_FFMPEG_DIR="$SLICER_FFMPEG_DIR"
+          mkdir -p build/validation/native-library
+          "$SLICER_FFMPEG_DIR/ffmpeg" -v error -f lavfi -i 'testsrc2=size=1920x1080:rate=60:duration=5' -f lavfi -i 'sine=frequency=440:duration=5' -c:v libopenh264 -b:v 2000000 -c:a aac 'build/validation/native-library/Native 1080p60 日本.mp4'
+          if [[ "$PLATFORM" == macos ]]; then
+            export SLICER_MPV_LIBRARY="$PWD/build/playback/$TARGET/libmpv.2.dylib"
+            cargo test --locked -- --include-ignored
+          else
+            export SLICER_MPV_LIBRARY="$PWD/build/playback/$TARGET/libmpv.so.2"
+            xvfb-run -a cargo test --locked -- --include-ignored
+          fi
+      - name: Package macOS app and DMG
+        if: matrix.platform == 'macos'
+        run: |
+          scripts/build-macos.sh --playback-bundle "build/playback/$TARGET"
+          scripts/smoke-macos-bundle.sh "dist/slicer-$TARGET/Slicer.app"
+          hdiutil verify "dist/slicer-$TARGET.dmg"
+      - name: Package Linux portable archive and Debian installer
+        if: matrix.platform == 'linux'
+        run: |
+          cargo build --release --locked
+          python3 tools/collect-rust-notices.py build/rust-notices
+          scripts/package-linux.sh --binary target/release/slicer --ffmpeg-bundle "build/ffmpeg/$TARGET" --playback-bundle "build/playback/$TARGET" --name "slicer-$TARGET"
+          scripts/smoke-linux-bundle.sh "dist/slicer-$TARGET"
+          scripts/package-linux-deb.sh --binary target/release/slicer --ffmpeg-bundle "build/ffmpeg/$TARGET" --playback-bundle "build/playback/$TARGET"
+      - name: Stage release files
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          cp "dist/slicer-$TARGET.tar.gz" release-assets/
+          if [[ "$PLATFORM" == macos ]]; then
+            cp "dist/slicer-$TARGET.dmg" release-assets/
+          else
+            cp dist/*.deb "release-assets/slicer-$TARGET.deb"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    name: Publish all verified release assets
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.event.release.tag_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release-assets
+      - name: Check complete matrix and publish
+        shell: bash
+        run: |
+          for target in linux-x86_64 linux-aarch64 macos-x86_64 macos-aarch64; do
+            test -s "release-assets/slicer-$target.tar.gz"
+            if [[ "$target" == macos-* ]]; then
+              test -s "release-assets/slicer-$target.dmg"
+            else
+              test -s "release-assets/slicer-$target.deb"
+            fi
+          done
+          cp version.json release-assets/version.json
+          (cd release-assets && sha256sum -- *.tar.gz *.dmg *.deb version.json > SHA256SUMS.txt)
+          gh release upload "$RELEASE_TAG" release-assets/* --clobber

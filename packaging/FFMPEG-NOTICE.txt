@@ -27,7 +27,9 @@ Build profile
 -------------
 This is an LGPL-only build. It does not pass --enable-gpl,
 --enable-version3, or --enable-nonfree, and it does not link x264, libvpx,
-libmp3lame, or any other external codec library. FFmpeg's own libraries are
+libmp3lame. It links the pinned BSD-2-Clause OpenH264 library statically for
+H.264 encoding on all platforms. The corresponding OpenH264 source archive
+and COPYRIGHT/LICENSE text are included in ffmpeg-source/. FFmpeg's own libraries are
 linked statically into the two tools. On the default Linux build, the tools
 use the platform's dynamic libc, libm, and zlib runtime (the exact runtime
 dependencies are recorded by the build output); those operating-system
@@ -38,7 +40,7 @@ redistribution. The following native functionality is intentionally enabled:
 
 * demux/mux for common local MP4/MOV, Matroska/WebM, MPEG-TS, AVI, MP3, WAV,
   FLAC, Ogg, and image-pipe files;
-* native MPEG-4 Part 2 and AAC encoders;
+* OpenH264 H.264 encoder, plus native MPEG-4 Part 2 (fixtures) and AAC encoders;
 * native H.264, HEVC, MPEG-1/2/4, MJPEG, VP8, and VP9 decoders;
 * native MP3 and PCM decoders plus PCM encoders;
 * the filters needed by Slicer for exact trims and still-frame previews,
@@ -52,3 +54,11 @@ FFmpeg has no native VP8/VP9 or MP3 encoder. VP8/VP9 encoding would require
 libvpx, and MP3 encoding would require libmp3lame; those are separate optional
 dependencies and are deliberately not hidden in the LGPL bundle. H.264
 encoding through x264 is also omitted because FFmpeg documents x264 as GPL.
+
+OpenH264
+--------
+Version: 2.6.0
+Source: https://github.com/cisco/openh264/archive/refs/tags/v2.6.0.tar.gz
+SHA-256: 558544ad358283a7ab2930d69a9ceddf913f4a51ee9bf1bfb9e377322af81a69
+License: BSD-2-Clause (see COPYING.OPENH264).
+This is a source build, not a Cisco-distributed binary.

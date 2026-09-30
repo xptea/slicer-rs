@@ -10,7 +10,11 @@ pub(super) fn frame(
     let owner = cx.entity().downgrade();
     let client = matches!(window.window_decorations(), Decorations::Client { .. });
     let maximized = window.is_maximized() || window.is_fullscreen();
-    let radius = if maximized { px(0.) } else { px(18.) };
+    let radius = if maximized || cfg!(target_os = "macos") {
+        px(0.)
+    } else {
+        px(18.)
+    };
     let inset = if client && !maximized { px(6.) } else { px(0.) };
     // TitleBar lays out its custom children in a flex region that ends before
     // the platform control buttons. Position the title over the full bar and

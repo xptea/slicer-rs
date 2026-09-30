@@ -4,14 +4,20 @@ The Linux editor embeds a native X11 drawable inside the GPUI preview bounds.
 libmpv owns video decoding, GPU presentation, audio output, and media timing.
 GPUI owns navigation, the timeline, trim selection, transport, and export dialogs.
 Wayland desktops run this window through XWayland when DISPLAY is available.
-A native Wayland texture-import backend and other operating-system surfaces are
-separate integrations; they must not be reported as tested by the Linux build.
+macOS embeds an input-transparent NSOpenGLView in GPUI's AppKit view. libmpv's
+OpenGL render API draws directly into that CGL drawable; it never opens a
+separate player window or routes playback frames through the GPUI image cache.
+VideoToolbox is the macOS hardware-decoder preference, with software fallback.
+The CGL context remains current for renderer creation, drawing, and destruction.
+The render context is freed before the player, and a retained core keeps libmpv
+alive until both the event worker and renderer have released it.
+Native Wayland and Windows surfaces remain separate integrations.
 
 ## Responsibilities
 
 - `src/native_player.rs`: persistent libmpv handle, commands, coalesced seeks,
   playback state, renderer/decoder diagnostics, and shutdown.
-- `src/ui/native_surface.rs`: child drawable, scale-aware placement, visibility,
+- `src/ui/native_surface.rs`, `native_surface_macos.rs`: child drawable, scale-aware placement, visibility,
   and destruction.
 - `src/ui/native_preview.rs`: editor lifetime, loading, seek completion, and
   synchronization between the media engine and the controls.
@@ -51,7 +57,7 @@ A GPU-rendered software-decoded video is a valid fallback, not proof of hardware
 decoding. A software GPU renderer on Xvfb is useful for integration tests, not
 proof of native hardware performance.
 
-The default decoder preference is NVDEC, then VA-API, with software decoding as
+On Linux, the default decoder preference is NVDEC, then VA-API, with software decoding as
 the fallback. The reduced distribution intentionally does not bundle CUDA/NVDEC,
 so software decoding is the normal result on that profile. Vulkan Video decoding
 is excluded after sustained scrubbing stalled on the tested NVIDIA system; GPU
@@ -90,6 +96,13 @@ ignore the video crop.
 The Export split button uses saved defaults; its chevron opens Customize export.
 Settings persist format, 50–100 quality, output folder, and clipboard preference.
 UI exports use precise encoding automatically; the CLI retains explicit modes.
+Precise exports on every platform encode H.264 with OpenH264 and AAC, and MP4 metadata
+is placed before media data for browser/Discord playback. Existing MPEG-4 Part 2
+exports need to be exported again to receive the new codec. Quality scales a
+source-derived bitrate budget: 100% uses the source video bitrate, while 50%
+targets half that bitrate. AAC is capped at 192 kb/s per track. If stream rates
+are absent, file size/duration supplies an average budget. This controls size;
+100% does not promise lossless output or an exact file-size ratio.
 Default exports choose a free suffixed filename, with atomic no-replace protection
 still enforced by the export worker. Crop dimension probing runs on that worker.
 
@@ -97,6 +110,8 @@ On Linux, clipboard copying owns an X11 selection with `text/uri-list` and
 `x-special/gnome-copied-files`, so file managers receive a file rather than plain
 path text. The app retains ownership until another copy or app exit. Successful
 export closes customization and shows a top-center toast with Open folder.
+On macOS, NSPasteboard receives an NSURL for the complete exported file via
+NSPasteboardWriting. No image or decoded first frame is written to the clipboard.
 
 Resize batches configure/shape requests, keeps the surface mapped through empty
 layout passes, and avoids an opaque background clear. The vendored GPUI WGPU
@@ -140,3 +155,16 @@ a proxy or transcode the video. libmpv library/GPU initialization runs on a
 joinable background thread in parallel with metadata inspection. The native
 player persists across files, and a normal load does not request a redundant
 seek back to zero. Closing joins initialization before destroying its X11 surface.
+
+## macOS integration
+
+The app bundle carries `Slicer.icns`, native file document associations, Open/Quit
+menus and keyboard shortcuts. Finder open-file events feed the existing editor
+workflow. File copying writes an NSURL to NSPasteboard, so Finder receives a file
+instead of text. AppKit owns the window corners and title bar; Slicer paints an
+opaque, square content area. Retina drawable dimensions use `convertRectToBacking`
+while layout remains in logical points. The native view's `hitTest:` returns nil
+so timeline events and external file drops continue to reach GPUI.
+
+Use `scripts/build-macos.sh` for the desktop app and DMG, and
+`scripts/smoke-macos-bundle.sh` to verify the installed tool and dylib layout.

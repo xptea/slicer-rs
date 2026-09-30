@@ -1,0 +1,25 @@
+Installing Slicer
+=================
+
+Drag Slicer.app to Applications, then open it from Applications.
+Use the aarch64 download for Apple Silicon or x86_64 for Intel.
+The release's Info.plist records the minimum macOS version required by its
+bundled libraries. GitHub release builds run on macOS 15.
+
+Account-free builds have ad hoc code signatures. If macOS blocks opening:
+try opening Slicer once, then open System Settings > Privacy & Security,
+scroll to the Security section, and choose Open Anyway for Slicer.
+
+If macOS does not offer that option, after checking that you downloaded
+Slicer from the project's GitHub release, open Terminal and run:
+
+    xattr -dr com.apple.quarantine /Applications/Slicer.app
+    open /Applications/Slicer.app
+
+This approves only the installed Slicer app. Gatekeeper stays enabled for
+other applications. Downloaded DMGs cannot grant approval on another Mac:
+macOS applies quarantine when the file is downloaded. Removing metadata
+when building does not prevent this.
+
+Developer ID signing plus Apple notarization avoids this manual approval.
+The build scripts support that separately when credentials are available.

@@ -98,6 +98,10 @@ impl NativePreview {
                 Err(_) => self.error = Some("native player startup thread panicked".to_owned()),
             }
         }
+        #[cfg(target_os = "macos")]
+        if let Some(surface) = &mut self.surface {
+            surface.detach_player();
+        }
         drop(self.player.take());
         self.surface.take();
     }
@@ -228,6 +232,20 @@ impl NativePreview {
             }
         }
 
+        #[cfg(target_os = "macos")]
+        if let Some(player) = self.player.as_ref()
+            && let Err(error) = self
+                .surface
+                .as_mut()
+                .expect("native surface exists")
+                .attach_player(player)
+        {
+            self.error = Some(error.to_string());
+            self.failed = true;
+            self.hide();
+            return;
+        }
+
         if let Some(player) = self.player.as_ref()
             && self.loaded_path != self.path
             && let Some(path) = self.path.as_ref()
@@ -265,6 +283,7 @@ impl NativePreview {
         // Metadata may finish before the background player constructor. Keep a lightweight frame
         // heartbeat until startup and the first asynchronous load have both been observed.
         if self.player_start.is_some()
+            || self.seek_target.is_some()
             || (self.path.is_some() && !self.ready && self.error.is_none())
         {
             window.request_animation_frame();

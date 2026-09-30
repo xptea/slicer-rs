@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the small, LGPL-only FFmpeg tool pair used by Slicer.
+# Build the small FFmpeg + OpenH264 FFmpeg tool pair used by Slicer.
 #
 # The script never looks up ffmpeg on PATH. It downloads (or accepts) the
 # exact upstream source archive named in packaging/ffmpeg.lock, verifies its
@@ -20,7 +20,7 @@ fi
 source "$LOCK_FILE"
 
 TARGET=${SLICER_FFMPEG_TARGET:-linux-x86_64}
-OUTPUT_DIR=${SLICER_FFMPEG_OUTPUT:-$ROOT_DIR/build/ffmpeg/$TARGET}
+OUTPUT_DIR=${SLICER_FFMPEG_OUTPUT:-}
 CACHE_DIR=${SLICER_FFMPEG_CACHE_DIR:-$ROOT_DIR/build/ffmpeg/cache}
 SOURCE_ARCHIVE_PATH=${SLICER_FFMPEG_SOURCE_ARCHIVE_PATH:-}
 SOURCE_TREE=${SLICER_FFMPEG_SOURCE_DIR:-}
@@ -34,7 +34,7 @@ usage() {
     cat <<'USAGE'
 Usage: scripts/build-ffmpeg.sh [options]
 
-Build the pinned, native-codec LGPL FFmpeg bundle. The result is written as:
+Build the pinned LGPL FFmpeg bundle with BSD-licensed OpenH264. The result is written as:
   <output>/bin/ffmpeg
   <output>/bin/ffprobe
   <output>/source/ffmpeg-<version>.tar.xz
@@ -55,7 +55,8 @@ Options:
   -h, --help                Show this help
 
 Environment:
-  SLICER_FFMPEG_CC and SLICER_FFMPEG_CROSS_PREFIX select a cross toolchain.
+  SLICER_FFMPEG_CC/CXX/AR and SLICER_FFMPEG_CROSS_PREFIX select a cross toolchain.
+  A C++ compiler and pkg-config are required for the pinned OpenH264 build.
   SOURCE_DATE_EPOCH defaults to 0 for repeatable source builds.
 USAGE
 }
@@ -123,6 +124,8 @@ while (($# > 0)); do
             ;;
     esac
 done
+
+[[ -n "$OUTPUT_DIR" ]] || OUTPUT_DIR="$ROOT_DIR/build/ffmpeg/$TARGET"
 
 case "$TARGET" in
     linux-x86_64|linux-aarch64|macos-x86_64|macos-aarch64|windows-x86_64) ;;
@@ -286,6 +289,44 @@ if [[ -z "${SOURCE_DATE_EPOCH+x}" ]]; then
     export SOURCE_DATE_EPOCH=0
 fi
 
+# One pinned software H.264 implementation on every OS. No dependency on an
+# installed media library, hardware encoder, or host OpenH264 development package.
+OPENH264_ARCHIVE="$CACHE_DIR/$OPENH264_SOURCE_ARCHIVE"
+if [[ ! -f "$OPENH264_ARCHIVE" ]]; then
+    [[ "$OFFLINE" != 1 ]] || { printf 'error: missing OpenH264 source archive: %s\n' "$OPENH264_ARCHIVE" >&2; exit 1; }
+    download "$OPENH264_SOURCE_URL" "$OPENH264_ARCHIVE"
+fi
+verify_hash "$OPENH264_ARCHIVE" "$OPENH264_SOURCE_SHA256"
+PKG_CONFIG_TOOL=${SLICER_FFMPEG_PKG_CONFIG:-pkg-config}
+command -v "$PKG_CONFIG_TOOL" >/dev/null || { printf 'error: pkg-config is required to build the pinned OpenH264 library\n' >&2; exit 1; }
+OPENH264_TREE="$TEMP_ROOT/openh264"
+OPENH264_STAGE="$TEMP_ROOT/openh264-stage"
+mkdir -p "$OPENH264_TREE"
+tar -xzf "$OPENH264_ARCHIVE" -C "$OPENH264_TREE" --strip-components=1
+OPENH264_ARGS=("PREFIX=$OPENH264_STAGE" BUILDTYPE=Release USE_ASM=No)
+case "$TARGET" in
+    macos-aarch64|macos-x86_64)
+        export MACOSX_DEPLOYMENT_TARGET=${SLICER_MACOS_DEPLOYMENT_TARGET:-11.0}
+        OPENH264_ARGS+=(OS=darwin CC=clang CXX=clang++ STATIC_LDFLAGS=-lc++)
+        [[ "$TARGET" == macos-aarch64 ]] && OPENH264_ARGS+=(ARCH=arm64) || OPENH264_ARGS+=(ARCH=x86_64)
+        ;;
+    linux-aarch64) OPENH264_ARGS+=(OS=linux ARCH=arm64) ;;
+    linux-x86_64) OPENH264_ARGS+=(OS=linux ARCH=x86_64) ;;
+    windows-x86_64)
+        TOOLCHAIN_PREFIX=${SLICER_FFMPEG_CROSS_PREFIX:-x86_64-w64-mingw32-}
+        OPENH264_ARGS+=(OS=mingw_nt ARCH=x86_64 "CC=${TOOLCHAIN_PREFIX}gcc" "CXX=${TOOLCHAIN_PREFIX}g++" "AR=${TOOLCHAIN_PREFIX}ar"
+            'STATIC_LDFLAGS=-Wl,-Bstatic -lstdc++ -lgcc -lpthread -Wl,-Bdynamic')
+        ;;
+esac
+if [[ "$TARGET" == linux-* && -n "${SLICER_FFMPEG_CROSS_PREFIX:-}" ]]; then
+    OPENH264_ARGS+=("CC=${SLICER_FFMPEG_CROSS_PREFIX}gcc" "CXX=${SLICER_FFMPEG_CROSS_PREFIX}g++" "AR=${SLICER_FFMPEG_CROSS_PREFIX}ar")
+fi
+[[ -z "${SLICER_FFMPEG_CC:-}" ]] || OPENH264_ARGS+=("CC=$SLICER_FFMPEG_CC")
+[[ -z "${SLICER_FFMPEG_CXX:-}" ]] || OPENH264_ARGS+=("CXX=$SLICER_FFMPEG_CXX")
+[[ -z "${SLICER_FFMPEG_AR:-}" ]] || OPENH264_ARGS+=("AR=$SLICER_FFMPEG_AR")
+make -C "$OPENH264_TREE" -j"$JOBS" "${OPENH264_ARGS[@]}" install-static
+export PKG_CONFIG_LIBDIR="$OPENH264_STAGE/lib/pkgconfig"
+
 CONFIGURE_ARGS=(
     "--prefix=$STAGE_DIR"
     --disable-all
@@ -297,6 +338,10 @@ CONFIGURE_ARGS=(
     --disable-x86asm
     --disable-shared
     --enable-static
+    --enable-libopenh264
+    --enable-encoder=libopenh264
+    --pkg-config-flags=--static
+    "--pkg-config=$PKG_CONFIG_TOOL"
     --enable-ffmpeg
     --enable-ffprobe
     --enable-avcodec
@@ -445,6 +490,13 @@ case "$TARGET" in
         ;;
 esac
 
+if [[ "$TARGET" == macos-* ]]; then
+    export MACOSX_DEPLOYMENT_TARGET=${SLICER_MACOS_DEPLOYMENT_TARGET:-11.0}
+fi
+
+if [[ "$TARGET" == linux-* && -n "${SLICER_FFMPEG_CROSS_PREFIX:-}" ]]; then
+    CONFIGURE_ARGS+=(--enable-cross-compile "--cross-prefix=$SLICER_FFMPEG_CROSS_PREFIX")
+fi
 if [[ -n "${SLICER_FFMPEG_CC:-}" ]]; then
     CONFIGURE_ARGS+=("--cc=$SLICER_FFMPEG_CC")
 fi
@@ -487,7 +539,7 @@ SOURCE_ARCHIVE_DEST="$SOURCE_OUT_DIR/$FFMPEG_SOURCE_ARCHIVE"
 # A rebuild is often pointed at the archive already stored in the output
 # bundle. GNU install rejects copying a file over itself, so retain that
 # verified file in place while still copying archives supplied elsewhere.
-if [[ "$(realpath -e -- "$SOURCE_ARCHIVE_PATH")" != "$(realpath -m -- "$SOURCE_ARCHIVE_DEST")" ]]; then
+if [[ ! "$SOURCE_ARCHIVE_PATH" -ef "$SOURCE_ARCHIVE_DEST" ]]; then
     install -m 644 "$SOURCE_ARCHIVE_PATH" "$SOURCE_ARCHIVE_DEST"
 fi
 [[ -f "$SOURCE_TREE/COPYING.LGPLv2.1" ]] || {
@@ -503,6 +555,9 @@ if [[ -f "$CACHE_DIR/ffmpeg-devel.asc" ]]; then
 fi
 install -m 644 "$ROOT_DIR/packaging/FFMPEG-NOTICE.txt" "$OUTPUT_DIR/FFMPEG-NOTICE.txt"
 install -m 644 "$ROOT_DIR/packaging/ZLIB-NOTICE.txt" "$OUTPUT_DIR/ZLIB-NOTICE.txt"
+install -m 644 "$OPENH264_ARCHIVE" "$SOURCE_OUT_DIR/$OPENH264_SOURCE_ARCHIVE"
+install -m 644 "$OPENH264_TREE/LICENSE" "$OUTPUT_DIR/COPYING.OPENH264"
+install -m 644 "$OPENH264_TREE/LICENSE" "$SOURCE_OUT_DIR/COPYING.OPENH264"
 
 if [[ "$TARGET" == linux-* && "$STATIC_LINUX" == 1 ]]; then
     for program in ffmpeg ffprobe; do
@@ -519,7 +574,7 @@ CONFIGURATION=$(
         sed -n 's/^configuration: //p'
 )
 if grep -Eq -- '--enable-(gpl|version3|nonfree|libx264|libvpx|libmp3lame)' <<<"$CONFIGURATION"; then
-    printf 'error: build unexpectedly contains a GPL/nonfree/external codec flag\n%s\n' \
+    printf 'error: build unexpectedly contains a GPL/nonfree/unapproved codec flag\n%s\n' \
         "$CONFIGURATION" >&2
     exit 1
 fi
@@ -536,6 +591,7 @@ require_component() {
     fi
 }
 
+require_component encoders libopenh264
 require_component encoders gif
 require_component muxers gif
 for component in fps split palettegen paletteuse anullsrc; do
@@ -560,7 +616,9 @@ PROBE_SHA256=$(sha256 "$BIN_DIR/ffprobe$PROGRAM_SUFFIX")
     printf 'Source size:            %s bytes\n' "$FFMPEG_SOURCE_SIZE"
     printf 'Source signature URL:   %s\n' "$FFMPEG_SIGNATURE_URL"
     printf 'Release key fingerprint:%s\n' "$FFMPEG_RELEASE_KEY_FINGERPRINT"
-    printf 'License:                %s\n' "$FFMPEG_LICENSE"
+    printf 'License:                %s + BSD-2-Clause (OpenH264)\n' "$FFMPEG_LICENSE"
+    printf 'OpenH264 version:       %s\n' "$OPENH264_VERSION"
+    printf 'OpenH264 source SHA:    %s\n' "$OPENH264_SOURCE_SHA256"
     printf 'ffmpeg SHA-256:         %s\n' "$BIN_SHA256"
     printf 'ffprobe SHA-256:        %s\n' "$PROBE_SHA256"
     if [[ "$TARGET" == linux-* && "$STATIC_LINUX" == 1 ]]; then

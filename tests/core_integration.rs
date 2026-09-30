@@ -504,7 +504,11 @@ fn crop_dimension_probe_does_not_block_job_spawn() {
     let began = Instant::now();
     let handle = JobHandle::spawn(
         Binaries {
-            ffmpeg: PathBuf::from("/bin/false"),
+            ffmpeg: PathBuf::from(if cfg!(target_os = "macos") {
+                "/usr/bin/false"
+            } else {
+                "/bin/false"
+            }),
             ffprobe,
         },
         ExportRequest {
@@ -660,4 +664,138 @@ fn invalid_input_is_rejected_before_starting_a_process() {
         Err(error) => error,
     };
     assert!(error.to_string().contains("input"));
+}
+
+#[test]
+#[ignore = "requires explicit SLICER_TEST_FFMPEG_DIR with OpenH264"]
+fn mp4_exports_browser_compatible_moving_video() {
+    let binaries = explicit_test_binaries().expect("set SLICER_TEST_FFMPEG_DIR");
+    let directory = tempfile::tempdir().unwrap();
+    let input =
+        create_fixture_with_audio_tracks(&binaries, directory.path(), 1, "moving input 日本.mp4");
+    let output = directory.path().join("discord clip.mp4");
+    let job = JobHandle::spawn(
+        binaries.clone(),
+        ExportRequest {
+            input,
+            output: output.clone(),
+            start: 0.2,
+            end: 2.5,
+            mode: TrimMode::Exact,
+            format: OutputFormat::Mp4,
+            crop: None,
+            quality: 75,
+            mute_audio: false,
+        },
+    )
+    .unwrap();
+    loop {
+        match job.events.recv_timeout(Duration::from_secs(20)).unwrap() {
+            JobEvent::Completed(_) => break,
+            JobEvent::Failed(error) => panic!("H.264 export failed: {error}"),
+            JobEvent::Cancelled => panic!("H.264 export cancelled"),
+            JobEvent::Progress(_) => {}
+        }
+    }
+    let metadata = slicer::media::inspect(&binaries, &output).unwrap();
+    assert!(
+        metadata
+            .streams
+            .iter()
+            .any(|s| s.kind == "video" && s.codec == "h264")
+    );
+    assert!(
+        metadata
+            .streams
+            .iter()
+            .any(|s| s.kind == "audio" && s.codec == "aac")
+    );
+    let bytes = std::fs::read(&output).unwrap();
+    let moov = bytes.windows(4).position(|w| w == b"moov").unwrap();
+    let mdat = bytes.windows(4).position(|w| w == b"mdat").unwrap();
+    assert!(
+        moov < mdat,
+        "MP4 metadata must precede media for embedded playback"
+    );
+    let worker = slicer::preview::PreviewWorker::new(binaries);
+    worker.request(output.clone(), 0.2);
+    let first = worker
+        .events
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap()
+        .result
+        .unwrap();
+    worker.request(output, 1.5);
+    let later = worker
+        .events
+        .recv_timeout(Duration::from_secs(10))
+        .unwrap()
+        .result
+        .unwrap();
+    assert_ne!(
+        first, later,
+        "exported video must advance beyond its first frame"
+    );
+}
+
+#[test]
+#[ignore = "requires explicit SLICER_TEST_FFMPEG_DIR with OpenH264"]
+fn high_quality_short_clip_stays_within_the_source_bitrate_budget() {
+    let binaries = explicit_test_binaries().expect("set SLICER_TEST_FFMPEG_DIR");
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("low bitrate source.mov");
+    let status = Command::new(&binaries.ffmpeg)
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=320x240:rate=30:duration=30",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=16000:duration=30",
+            "-c:v",
+            "libopenh264",
+            "-rc_mode",
+            "bitrate",
+            "-b:v",
+            "285000",
+            "-c:a",
+            "pcm_s16le",
+            "-ac",
+            "2",
+        ])
+        .arg(&input)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let output = directory.path().join("six second clip.mp4");
+    let handle = JobHandle::spawn(
+        binaries.clone(),
+        ExportRequest {
+            input: input.clone(),
+            output: output.clone(),
+            start: 3.0,
+            end: 9.0,
+            mode: TrimMode::Exact,
+            format: OutputFormat::Mp4,
+            crop: None,
+            quality: 100,
+            mute_audio: false,
+        },
+    )
+    .unwrap();
+    let (terminal, _) = wait_for_terminal(handle);
+    assert!(matches!(terminal, JobEvent::Completed(_)), "{terminal:?}");
+    let source_size = std::fs::metadata(input).unwrap().len();
+    let clip_size = std::fs::metadata(&output).unwrap().len();
+    assert!(
+        clip_size < source_size * 2 / 5,
+        "a one-fifth cut should not balloon: source={source_size}, clip={clip_size}"
+    );
+    let metadata = media::inspect(&binaries, &output).unwrap();
+    assert!(metadata.duration > 5.8 && metadata.duration < 6.3);
+    assert!(metadata.streams.iter().any(|s| s.codec == "h264"));
 }

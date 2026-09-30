@@ -20,5 +20,5 @@ in playback-source/ and SOURCE-MANIFEST.txt. Follow the terms of each
 component when redistributing or modifying the package.
 
 The standalone FFmpeg command line tools in lib/slicer/bin/ are the separate
-source-pinned LGPL profile described in packaging.md. Their LGPL notice does
+source-pinned LGPL FFmpeg/BSD-2-Clause OpenH264 profile described in packaging.md. Their LGPL notice does
 not change the license of the playback runtime.
