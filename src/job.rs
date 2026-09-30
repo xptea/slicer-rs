@@ -17,7 +17,7 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const MAX_STDERR_BYTES: usize = 64 * 1024;
 
@@ -105,6 +105,14 @@ pub enum JobEvent {
     Completed(PathBuf),
     Cancelled,
     Failed(String),
+}
+
+/// Estimate from measured encoding progress, never from an assumed encode speed.
+pub fn estimated_remaining(progress: f64, elapsed: Duration) -> Option<Duration> {
+    if !progress.is_finite() || !(0.005..1.0).contains(&progress) || elapsed.as_secs_f64() < 0.5 {
+        return None;
+    }
+    Duration::try_from_secs_f64(elapsed.as_secs_f64() * (1.0 - progress) / progress).ok()
 }
 
 /// Handle for a running export.
@@ -815,7 +823,8 @@ fn run_export(
             match line {
                 Ok(line) => {
                     if let Some(seconds) = progress_seconds(&line) {
-                        let progress = (seconds / total).clamp(0.0, 1.0);
+                        // Reserve 100% for successful publication of the final file.
+                        let progress = (seconds / total).clamp(0.0, 0.99);
                         if progress >= 1.0 || progress - last_progress >= 0.005 {
                             last_progress = progress;
                             send_event(&sender, JobEvent::Progress(progress));
@@ -965,14 +974,13 @@ fn build_args_with_gif_capabilities(
             .into_iter()
             .map(OsString::from),
     );
-    // FFmpeg's GIF muxer in the small native build rejects the progress
-    // protocol when a palette filter graph is present, even though the same
-    // graph is valid without it. GIF jobs are short, finite encodes, so report
-    // the initial and completed states from the worker instead of attaching a
-    // progress pipe that can turn a valid GIF into an empty output.
-    if !is_gif {
-        args.extend([OsString::from("-progress"), OsString::from("pipe:1")]);
-    }
+    // The bundled GIF palette pipeline supports the same progress protocol as
+    // video exports. A short reporting interval keeps small cuts responsive.
+    args.extend(
+        ["-stats_period", "0.2", "-progress", "pipe:1"]
+            .into_iter()
+            .map(OsString::from),
+    );
 
     if silent_wav {
         // There may be no source audio at all, so synthesize a deterministic
@@ -1254,6 +1262,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn remaining_time_uses_measured_progress_and_avoids_invalid_estimates() {
+        assert_eq!(
+            estimated_remaining(0.25, Duration::from_secs(10)),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            estimated_remaining(0.5, Duration::from_secs(10)),
+            Some(Duration::from_secs(10))
+        );
+        for progress in [0.0, -1.0, 0.001, 1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(estimated_remaining(progress, Duration::from_secs(10)), None);
+        }
+        assert_eq!(estimated_remaining(0.1, Duration::from_millis(100)), None);
+    }
+
+    #[test]
     fn parses_progress_formats() {
         assert_eq!(progress_seconds("out_time_ms=2500000"), Some(2.5));
         assert_eq!(progress_seconds("out_time_us=1250000"), Some(1.25));
@@ -1481,7 +1505,7 @@ mod tests {
         assert!(graph.contains("setpts=PTS-STARTPTS,crop=80:40:20:10,fps=20,split=2"));
         assert!(!args.contains(&"-ss".to_owned()));
         assert!(args.contains(&"-t".to_owned()));
-        assert!(!args.contains(&"-progress".to_owned()));
+        assert!(args.contains(&"-progress".to_owned()));
     }
 
     #[test]

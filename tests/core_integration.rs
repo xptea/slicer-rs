@@ -799,3 +799,85 @@ fn high_quality_short_clip_stays_within_the_source_bitrate_budget() {
     assert!(metadata.duration > 5.8 && metadata.duration < 6.3);
     assert!(metadata.streams.iter().any(|s| s.codec == "h264"));
 }
+
+#[test]
+#[ignore = "requires explicit SLICER_TEST_FFMPEG_DIR"]
+fn gif_exports_report_intermediate_progress_and_publish_a_moving_gif() {
+    let binaries = test_binaries().expect("set SLICER_TEST_FFMPEG_DIR");
+    let directory = tempfile::tempdir().unwrap();
+    let input = directory.path().join("moving source.mp4");
+    let output = directory.path().join("cut.gif");
+    let generated = std::process::Command::new(&binaries.ffmpeg)
+        .args([
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc2=size=480x270:rate=30:duration=8",
+            "-c:v",
+            "mpeg4",
+        ])
+        .arg(&input)
+        .status()
+        .unwrap();
+    assert!(generated.success());
+    let handle = JobHandle::spawn(
+        binaries.clone(),
+        ExportRequest {
+            input,
+            output: output.clone(),
+            start: 1.0,
+            end: 7.0,
+            mode: TrimMode::Exact,
+            format: OutputFormat::Gif,
+            crop: None,
+            quality: 100,
+            mute_audio: false,
+        },
+    )
+    .unwrap();
+    let mut intermediate = Vec::new();
+    loop {
+        match handle.events.recv_timeout(Duration::from_secs(30)).unwrap() {
+            JobEvent::Progress(progress) if progress > 0.0 && progress < 1.0 => {
+                intermediate.push(progress);
+            }
+            JobEvent::Progress(_) => {}
+            JobEvent::Completed(_) => break,
+            terminal => panic!("GIF export failed: {terminal:?}"),
+        }
+    }
+    assert!(
+        intermediate.len() >= 2,
+        "expected multiple intermediate updates, got {intermediate:?}"
+    );
+    assert!(intermediate.windows(2).all(|p| p[0] < p[1]));
+    let mut options = gif::DecodeOptions::new();
+    options.set_color_output(gif::ColorOutput::RGBA);
+    let mut reader = options
+        .read_info(std::fs::File::open(&output).unwrap())
+        .unwrap();
+    let mut frames = 0;
+    let mut delay = 0u32;
+    let mut first = Vec::new();
+    let mut moving = false;
+    while let Some(frame) = reader.read_next_frame().unwrap() {
+        delay += u32::from(frame.delay);
+        if frames == 0 {
+            first = frame.buffer.to_vec();
+        } else if frame.buffer.as_ref() != first.as_slice() {
+            moving = true;
+        }
+        frames += 1;
+    }
+    assert!(
+        frames > 100 && moving,
+        "GIF must decode into distinct animated frames"
+    );
+    assert!(
+        (f64::from(delay) / 100.0 - 6.0).abs() < 0.2,
+        "GIF cut duration was {}",
+        f64::from(delay) / 100.0
+    );
+}

@@ -23,3 +23,7 @@ when building does not prevent this.
 
 Developer ID signing plus Apple notarization avoids this manual approval.
 The build scripts support that separately when credentials are available.
+
+Source code archives are provided separately in the matching .tar.gz download
+on the same GitHub release. The app contains its complete playback and export
+runtimes; no separate source archive or Homebrew installation is needed to run it.

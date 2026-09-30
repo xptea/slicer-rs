@@ -32,6 +32,7 @@ objc2-quartz-core = "0.3.2"
 
 [dev-dependencies]
 tempfile = "3"
+gif = "0.13"
 
 [profile.dev]
 debug = 0

@@ -191,6 +191,18 @@ impl SlicerApp {
                         .child("Export in progress")
                         .child(format!("{:.0}%", self.export_progress * 100.0)),
                 )
+                .child(div().text_xs().text_color(ink(MUTED)).child(
+                    if self.export_progress >= 0.99 {
+                        "Finishing export…".to_owned()
+                    } else if let Some(remaining) = self.export_started_at.and_then(|start| {
+                        job::estimated_remaining(self.export_progress, start.elapsed())
+                    }) {
+                        let seconds = remaining.as_secs_f64().ceil().max(1.0);
+                        format!("About {} remaining", format_timestamp(seconds))
+                    } else {
+                        "Estimating time remaining…".to_owned()
+                    },
+                ))
                 .child(
                     h_flex()
                         .gap_3()

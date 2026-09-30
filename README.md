@@ -82,11 +82,18 @@ Offline checks do not interrupt editing. Settings shows the installed version.
 ## Publishing releases
 
 The [release workflow](.github/workflows/release.yml) runs only when a GitHub
-release is published, never on pushes. It builds Linux x86_64/ARM64 and macOS
+release is published, never on pushes. It dispatches the
+[build workflow](.github/workflows/build-release.yml) on `main`, which checks out
+the release tag and builds Linux x86_64/ARM64 and macOS
 Intel/Apple Silicon, tests the bundled runtimes, and uploads DMGs, portable
 archives, Debian packages and SHA-256 checksums after every build succeeds.
 macOS builds run on macOS 15; Ubuntu builds run on Ubuntu 24.04 (X11/XWayland).
 The exact minimum macOS requirement is recorded from the bundled binaries.
+Rust dependencies, compiled FFmpeg/playback runtimes, and source downloads are
+cached across releases. Tests and packaging share the Rust release profile.
+The first build fills these caches; later builds reuse unchanged dependencies.
+DMGs contain the app and its runtimes; the matching `.tar.gz` also carries the
+corresponding media sources outside the app bundle.
 
 For each stable release, set the same version in `Cargo.toml` and `version.json`,
 update `Cargo.lock`, and commit those changes to `main`. Publish a GitHub release

@@ -1,0 +1,236 @@
+name: Build release downloads
+run-name: Release ${{ github.event.client_payload.release_tag }} (${{ github.event.client_payload.request_id }})
+
+# repository_dispatch runs on main, so caches are reusable by later releases.
+on:
+  repository_dispatch:
+    types: [slicer-release-build]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-build-${{ github.event.client_payload.release_tag }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.event.client_payload.release_tag }}
+    steps:
+      - name: Require an existing published stable release
+        run: |
+          python3 -c 'import os,re; assert re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", os.environ["RELEASE_TAG"]), "invalid stable release tag"'
+          gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" > release.json
+          python3 -c 'import json; r=json.load(open("release.json")); assert not r["draft"] and not r["prerelease"] and r["published_at"], "publish a stable release first"'
+
+  build:
+    needs: validate
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux
+            target: linux-x86_64
+          - runner: ubuntu-24.04-arm
+            platform: linux
+            target: linux-aarch64
+          - runner: macos-15
+            platform: macos
+            target: macos-aarch64
+          - runner: macos-15-intel
+            platform: macos
+            target: macos-x86_64
+    env:
+      RELEASE_TAG: ${{ github.event.client_payload.release_tag }}
+      TARGET: ${{ matrix.target }}
+      PLATFORM: ${{ matrix.platform }}
+      CARGO_TERM_COLOR: always
+      MACOSX_DEPLOYMENT_TARGET: '15.0'
+      SLICER_MACOS_DEPLOYMENT_TARGET: '15.0'
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.client_payload.release_tag }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache Rust dependencies and release artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: release-${{ matrix.runner }}-${{ matrix.target }}
+          key: ${{ hashFiles('vendor/**', '.cargo/**') }}
+          env-vars: CARGO CC CFLAGS CXX CMAKE RUST MACOSX_DEPLOYMENT_TARGET SLICER_MACOS_DEPLOYMENT_TARGET
+          cache-workspace-crates: true
+          cache-on-failure: true
+          cache-bin: false
+      - name: Restore compiled export runtime
+        id: ffmpeg-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build/ffmpeg/${{ matrix.target }}
+          key: ffmpeg-v1-${{ matrix.runner }}-${{ matrix.target }}-${{ hashFiles('packaging/ffmpeg.lock', 'scripts/build-ffmpeg.sh') }}
+      - name: Restore complete playback runtime
+        id: playback-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: build/playback/${{ matrix.target }}
+          key: playback-v1-${{ matrix.runner }}-${{ matrix.target }}-${{ hashFiles('packaging/mpv-minimal.lock', 'packaging/PLAYBACK-NOTICE.txt', 'scripts/bundle-playback-*', 'scripts/collect-playback-sources.py') }}
+      - name: Restore export source downloads
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: build/ffmpeg/cache
+          key: ffmpeg-sources-v1-${{ hashFiles('packaging/ffmpeg.lock') }}
+          restore-keys: ffmpeg-sources-v1-
+      - name: Restore playback source downloads
+        if: steps.playback-cache.outputs.cache-hit != 'true'
+        uses: actions/cache@v4
+        with:
+          path: build/playback-source
+          key: playback-sources-v1-${{ matrix.runner }}-${{ matrix.target }}-${{ hashFiles('packaging/mpv-minimal.lock', 'scripts/collect-playback-sources.py') }}
+          restore-keys: playback-sources-v1-${{ matrix.runner }}-${{ matrix.target }}-
+      - name: Validate release version
+        run: python3 scripts/check-release-version.py --tag "$RELEASE_TAG"
+      - name: Install Linux build dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
+          sudo apt-get update
+          PLAYBACK_PACKAGES=()
+          if [[ "${{ steps.playback-cache.outputs.cache-hit }}" != true ]]; then
+            PLAYBACK_PACKAGES+=(libmpv2)
+          fi
+          sudo apt-get install -y "${PLAYBACK_PACKAGES[@]}" build-essential clang cmake pkg-config nasm python3 patchelf dpkg-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libfontconfig1-dev libfreetype6-dev libvulkan-dev libssl-dev libzstd-dev zlib1g-dev libasound2-dev xvfb mesa-vulkan-drivers libegl1-mesa-dev libgl1-mesa-dev
+      - name: Install macOS build dependencies
+        if: matrix.platform == 'macos'
+        shell: bash
+        run: |
+          if [[ "${{ steps.playback-cache.outputs.cache-hit }}" != true ]]; then brew install mpv; fi
+          if [[ "${{ steps.ffmpeg-cache.outputs.cache-hit }}" != true ]]; then brew install pkgconf nasm; fi
+      - name: Build pinned export runtime
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        run: scripts/build-ffmpeg.sh --target "$TARGET" --output "build/ffmpeg/$TARGET"
+      - name: Inventory playback runtime and collect corresponding sources
+        if: steps.playback-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          if [[ "$PLATFORM" == macos ]]; then
+            python3 scripts/bundle-playback-macos.py --libmpv "$(brew --prefix mpv)/lib/libmpv.2.dylib" --output build/playback-inventory --allow-missing-sources
+            python3 scripts/collect-playback-sources.py macos build/playback-inventory build/playback-source
+            python3 scripts/bundle-playback-macos.py --libmpv "$(brew --prefix mpv)/lib/libmpv.2.dylib" --output "build/playback/$TARGET" --source-cache build/playback-source --require-source-index
+          else
+            scripts/bundle-playback-linux.sh --output build/playback-inventory --allow-missing-sources
+            python3 scripts/collect-playback-sources.py linux build/playback-inventory build/playback-source
+            scripts/bundle-playback-linux.sh --output "build/playback/$TARGET" --source-cache build/playback-source
+          fi
+      - name: Verify restored or built media runtimes
+        shell: bash
+        run: |
+          scripts/verify-export-bundle.sh "build/ffmpeg/$TARGET"
+          if [[ "$PLATFORM" == macos ]]; then
+            python3 scripts/bundle-playback-macos.py --check "build/playback/$TARGET"
+          else
+            scripts/bundle-playback-linux.sh --check "build/playback/$TARGET"
+          fi
+          python3 scripts/verify-playback-sources.py "$PLATFORM" "build/playback/$TARGET"
+      # Save expensive native builds now, even if a later app test fails.
+      - name: Save compiled export runtime
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/ffmpeg/${{ matrix.target }}
+          key: ${{ steps.ffmpeg-cache.outputs.cache-primary-key }}
+      - name: Save complete playback runtime
+        if: steps.playback-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/playback/${{ matrix.target }}
+          key: ${{ steps.playback-cache.outputs.cache-primary-key }}
+      - name: Test application and bundled media
+        shell: bash
+        run: |
+          export SLICER_FFMPEG_DIR="$PWD/build/ffmpeg/$TARGET/bin"
+          export SLICER_TEST_FFMPEG_DIR="$SLICER_FFMPEG_DIR"
+          mkdir -p build/validation/native-library
+          "$SLICER_FFMPEG_DIR/ffmpeg" -v error -f lavfi -i 'testsrc2=size=1920x1080:rate=60:duration=5' -f lavfi -i 'sine=frequency=440:duration=5' -c:v libopenh264 -b:v 2000000 -c:a aac 'build/validation/native-library/Native 1080p60 日本.mp4'
+          if [[ "$PLATFORM" == macos ]]; then
+            export SLICER_MPV_LIBRARY="$PWD/build/playback/$TARGET/libmpv.2.dylib"
+            cargo test --release --locked -- --include-ignored
+          else
+            export SLICER_MPV_LIBRARY="$PWD/build/playback/$TARGET/libmpv.so.2"
+            xvfb-run -a cargo test --release --locked -- --include-ignored
+          fi
+      - name: Package macOS app and DMG
+        if: matrix.platform == 'macos'
+        run: |
+          scripts/build-macos.sh --playback-bundle "build/playback/$TARGET"
+          scripts/smoke-macos-bundle.sh "dist/slicer-$TARGET/Slicer.app"
+          hdiutil verify "dist/slicer-$TARGET.dmg"
+      - name: Package Linux portable archive and Debian installer
+        if: matrix.platform == 'linux'
+        run: |
+          cargo build --release --locked
+          python3 tools/collect-rust-notices.py build/rust-notices
+          scripts/package-linux.sh --binary target/release/slicer --ffmpeg-bundle "build/ffmpeg/$TARGET" --playback-bundle "build/playback/$TARGET" --name "slicer-$TARGET"
+          scripts/smoke-linux-bundle.sh "dist/slicer-$TARGET"
+          scripts/package-linux-deb.sh --binary target/release/slicer --ffmpeg-bundle "build/ffmpeg/$TARGET" --playback-bundle "build/playback/$TARGET"
+      - name: Stage release files
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          cp "dist/slicer-$TARGET.tar.gz" release-assets/
+          if [[ "$PLATFORM" == macos ]]; then
+            cp "dist/slicer-$TARGET.dmg" release-assets/
+          else
+            cp dist/*.deb "release-assets/slicer-$TARGET.deb"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+  publish:
+    name: Publish all verified release assets
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ github.event.client_payload.release_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.client_payload.release_tag }}
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: release-assets
+      - name: Check complete matrix and publish
+        shell: bash
+        run: |
+          for target in linux-x86_64 linux-aarch64 macos-x86_64 macos-aarch64; do
+            test -s "release-assets/slicer-$target.tar.gz"
+            if [[ "$target" == macos-* ]]; then
+              test -s "release-assets/slicer-$target.dmg"
+            else
+              test -s "release-assets/slicer-$target.deb"
+            fi
+          done
+          cp version.json release-assets/version.json
+          (cd release-assets && sha256sum -- *.tar.gz *.dmg *.deb version.json > SHA256SUMS.txt)
+          gh release upload "$RELEASE_TAG" release-assets/* --clobber

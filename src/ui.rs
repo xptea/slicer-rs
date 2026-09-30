@@ -156,6 +156,7 @@ pub struct SlicerApp {
     export_job: Option<job::JobHandle>,
     export_state: ExportState,
     export_progress: f64,
+    export_started_at: Option<Instant>,
     exported_path: Option<PathBuf>,
     status: String,
 
@@ -287,6 +288,7 @@ impl SlicerApp {
             export_job: None,
             export_state: ExportState::Idle,
             export_progress: 0.0,
+            export_started_at: None,
             exported_path: None,
             status: "Choose a library folder or drop a video to get started".to_owned(),
             open_dialog_rx: None,

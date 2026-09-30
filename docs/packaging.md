@@ -350,10 +350,18 @@ pinned source profile and resolve from `Contents/lib/slicer/bin`.
 ```text
 Slicer.app/Contents/MacOS/slicer
 Slicer.app/Contents/lib/slicer/bin/{ffmpeg,ffprobe}
-Slicer.app/Contents/lib/slicer/playback/{libmpv.2.dylib,private dylibs,notices,source}
+Slicer.app/Contents/lib/slicer/playback/{libmpv.2.dylib,private dylibs,notices}
 Slicer.app/Contents/Resources/Slicer.icns
-Slicer.app/Contents/Resources/slicer/{ffmpeg-source,notices,rust-notices}
+Slicer.app/Contents/Resources/slicer/{SOURCE-DOWNLOAD.txt,rust-notices,license notices}
+corresponding-source/{ffmpeg,playback}   # Included in the tar archive only
 ```
+
+The DMG contains the compressed runtime app, without the large media source
+archives. The matching `.tar.gz` contains both the app and those archives beside
+it. The app's `SOURCE-DOWNLOAD.txt` links to the exact version's media archive
+and Slicer source tag. Keep these sources available when redistributing the app.
+Runtime libraries and license notices remain inside the app, so recipients do
+not need Homebrew or the source archive to play and export videos.
 
 Playback notices include installed Homebrew license files, receipts, build
 formulas, SBOMs, and input hashes. Put the exact corresponding source archives
@@ -436,13 +444,28 @@ continues to use each platform’s native libmpv surface.
 
 ## Release automation and update feed
 
-`.github/workflows/release.yml` runs for `release: published` only. There is no
-push or pull-request trigger. Stable `vMAJOR.MINOR.PATCH` releases build natively
+`.github/workflows/release.yml` runs for `release: published` only and dispatches
+`.github/workflows/build-release.yml` using `repository_dispatch` on `main`.
+The worker checks out the published release tag. Running the workflow on the
+default branch allows successive release tags to share GitHub caches, which
+otherwise cannot be restored across sibling tags. There is no push or
+pull-request trigger. Stable `vMAJOR.MINOR.PATCH` releases build natively
 on Ubuntu 24.04 x86_64/ARM64 and macOS 15 Intel/Apple Silicon. Version validation,
 all application/media tests, source collection, runtime relocation, package
 smoke checks and macOS signature/DMG checks must pass before the publish job
 uploads any assets. Rerunning a failed release workflow replaces that release's
 asset filenames. Prereleases skip the production build and updater.
+
+Rust's registry, Git dependencies, and compiled release artifacts are cached per
+runner/architecture and toolchain with manifest, lockfile, and vendored-source
+invalidation. Media caches retain the complete compiled FFmpeg and playback
+closures, including corresponding sources, keyed by platform and build recipe.
+Restored runtime binaries and source hashes are verified before reuse. Native
+runtime caches are saved before application tests, so a later failure does not
+discard those builds. Separate source download caches also speed up runtime
+rebuilds. Tests use `cargo test --release`, sharing dependencies with packaging.
+The first build is cold; GitHub can evict old caches, so cache reuse is an
+optimization rather than a prerequisite for a successful build.
 
 The Linux job enables distro source repositories and downloads the exact
 `.dsc`/upstream/distro archives named by the copied ELF dependency inventory.

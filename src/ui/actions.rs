@@ -415,6 +415,7 @@ impl SlicerApp {
                 self.export_job = Some(handle);
                 self.export_state = ExportState::Running;
                 self.export_progress = 0.0;
+                self.export_started_at = Some(Instant::now());
                 self.exported_path = None;
                 self.status = "Export queued in the background".to_owned();
             }

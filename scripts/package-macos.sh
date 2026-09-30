@@ -223,15 +223,16 @@ if [[ -e "$PACKAGE_DIR" || -e "$ARCHIVE_PATH" || -e "$DMG_PATH" ]]; then
 fi
 
 APP_DIR="$PACKAGE_DIR/Slicer.app"
+SOURCE_DIR="$PACKAGE_DIR/corresponding-source"
 mkdir -p -- "$APP_DIR/Contents/MacOS" \
     "$APP_DIR/Contents/lib/slicer/bin" \
     "$APP_DIR/Contents/lib/slicer/playback" \
-    "$APP_DIR/Contents/Resources/slicer/ffmpeg-source" \
+    "$SOURCE_DIR/ffmpeg" \
     "$APP_DIR/Contents/Resources/slicer/rust-notices"
 install -m 755 "$BINARY_PATH" "$APP_DIR/Contents/MacOS/slicer"
 install -m 755 "$FFMPEG_BUNDLE/bin/ffmpeg" "$APP_DIR/Contents/lib/slicer/bin/ffmpeg"
 install -m 755 "$FFMPEG_BUNDLE/bin/ffprobe" "$APP_DIR/Contents/lib/slicer/bin/ffprobe"
-cp -R "$FFMPEG_BUNDLE/source/." "$APP_DIR/Contents/Resources/slicer/ffmpeg-source/"
+cp -R "$FFMPEG_BUNDLE/source/." "$SOURCE_DIR/ffmpeg/"
 install -m 644 "$FFMPEG_BUNDLE/COPYING.LGPLv2.1" \
     "$APP_DIR/Contents/Resources/slicer/COPYING.LGPLv2.1"
 install -m 644 "$FFMPEG_BUNDLE/COPYING.OPENH264" "$APP_DIR/Contents/Resources/slicer/COPYING.OPENH264"
@@ -242,6 +243,9 @@ if [[ -f "$FFMPEG_BUNDLE/ZLIB-NOTICE.txt" ]]; then
         "$APP_DIR/Contents/Resources/slicer/ZLIB-NOTICE.txt"
 fi
 cp -R "$PLAYBACK_BUNDLE/." "$APP_DIR/Contents/lib/slicer/playback/"
+if [[ -d "$APP_DIR/Contents/lib/slicer/playback/source" ]]; then
+    mv "$APP_DIR/Contents/lib/slicer/playback/source" "$SOURCE_DIR/playback"
+fi
 cp -R "$RUST_NOTICES/." "$APP_DIR/Contents/Resources/slicer/rust-notices/"
 install -m 644 "$ROOT_DIR/docs/packaging.md" \
     "$APP_DIR/Contents/Resources/slicer/packaging.md"
@@ -257,7 +261,7 @@ for size in 16 32 128 256 512; do
     sips -z "$double" "$double" "$ICON_INPUT" --out "$ICON_WORK/Slicer.iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
 iconutil -c icns "$ICON_WORK/Slicer.iconset" -o "$APP_DIR/Contents/Resources/Slicer.icns"
-python3 - "$ROOT_DIR/Cargo.toml" "$APP_DIR/Contents/Info.plist" <<'PYINFO'
+python3 - "$ROOT_DIR/Cargo.toml" "$APP_DIR/Contents/Info.plist" "$PACKAGE_NAME" <<'PYINFO'
 import pathlib, plistlib, re, subprocess, sys
 version = re.search(r'^version\s*=\s*"([^"]+)"', pathlib.Path(sys.argv[1]).read_text(), re.M).group(1)
 info = {
@@ -272,6 +276,15 @@ info = {
         'LSHandlerRank': 'Alternate', 'LSItemContentTypes': ['public.movie', 'public.video']}],
 }
 contents = pathlib.Path(sys.argv[2]).parent
+(contents / 'Resources/slicer/SOURCE-DOWNLOAD.txt').write_text(f'''Corresponding media source archives are distributed alongside Slicer.app:
+https://github.com/xptea/slicer-rs/releases/download/v{version}/{sys.argv[3]}.tar.gz
+The archive includes corresponding-source/ffmpeg and corresponding-source/playback.
+Slicer application source and build recipes for this version:
+https://github.com/xptea/slicer-rs/archive/refs/tags/v{version}.tar.gz
+These sources are not needed to run the app. Keep the matching source archives
+available when distributing the DMG or application. License notices remain in
+the application bundle.
+''')
 binaries = [contents / 'MacOS/slicer', *list((contents / 'lib/slicer/bin').iterdir()),
             *list((contents / 'lib/slicer/playback').glob('*.dylib'))]
 minimums = [(11, 0)]
