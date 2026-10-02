@@ -64,6 +64,13 @@ jobs:
         with:
           ref: ${{ github.event.client_payload.release_tag || inputs.release_tag || github.sha }}
           persist-credentials: false
+      - name: Use release worker Linux packaging helper
+        if: matrix.platform == 'linux' && env.RELEASE_TAG != ''
+        # Keep application code at the published tag. Build-only fixes can be
+        # applied by the workflow's pinned commit without moving a release tag.
+        run: |
+          git fetch --no-tags --depth=1 origin "$GITHUB_SHA"
+          git show "$GITHUB_SHA:scripts/bundle-playback-linux.sh" > scripts/bundle-playback-linux.sh
       - uses: dtolnay/rust-toolchain@stable
         with:
           # Upgrade deliberately, rather than discarding caches on a stable update.

@@ -399,10 +399,12 @@ source_hash_rows() {
 
 apt_package_field_for_version() {
     local package=$1 version=$2 field=$3
+    # Consume the complete metadata stream. Exiting awk after the first match
+    # can SIGPIPE apt-cache and fail the entire bundle under pipefail.
     apt-cache show -- "$package" 2>/dev/null | awk -v want="$version" -v field="$field" '
         /^Package:/ { keep=0 }
         /^Version:/ { keep=($2 == want) }
-        keep && index($0, field ":") == 1 { sub("^[^:]*:[[:space:]]*", ""); print; exit }
+        !found && keep && index($0, field ":") == 1 { sub("^[^:]*:[[:space:]]*", ""); print; found=1 }
     '
 }
 

@@ -446,7 +446,10 @@ continues to use each platform’s native libmpv surface.
 
 `.github/workflows/release.yml` runs for `release: published` only and dispatches
 `.github/workflows/build-release.yml` using `repository_dispatch` on `main`.
-The worker checks out the published release tag. Running the workflow on the
+The worker checks out the published release tag. The Linux playback packaging
+helper comes from the workflow's pinned commit, allowing packaging repairs
+without changing tagged application code or moving a published tag. Its content
+is included in the playback cache recipe. Running the workflow on the
 default branch allows successive release tags to share GitHub caches, which
 otherwise cannot be restored across sibling tags. Pushes do not trigger builds.
 Manual runs of **Build release downloads** use the same test/package pipeline.

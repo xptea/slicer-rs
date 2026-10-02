@@ -1,6 +1,8 @@
 """Regression coverage for concurrent source collection (no network needed)."""
 import importlib.util
+import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -71,6 +73,36 @@ raise SystemExit(7)
             self.assertLess(time.monotonic() - began, 10)
             with self.assertRaises(ProcessLookupError):
                 sources.os.kill(int(pid_file.read_text()), 0)
+
+
+class LinuxMetadataTests(unittest.TestCase):
+    def run_field_reader(self, producer):
+        script = (Path(__file__).resolve().parents[1] / 'scripts/bundle-playback-linux.sh').read_text()
+        function = re.search(r'apt_package_field_for_version\(\) \{.*?\n\}', script, re.S).group()
+        with tempfile.TemporaryDirectory() as temporary:
+            executable = Path(temporary) / 'apt-cache'
+            executable.write_text('#!/usr/bin/env python3\n' + producer)
+            executable.chmod(0o755)
+            return subprocess.run(
+                ['bash', '-euo', 'pipefail', '-c', function + '\napt_package_field_for_version example 1 Source'],
+                env={**os.environ, 'PATH': temporary + os.pathsep + os.environ['PATH']},
+                text=True, capture_output=True, timeout=10,
+            )
+
+    def test_large_metadata_output_is_consumed_without_sigpipe(self):
+        result = self.run_field_reader('''
+import signal, sys
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+sys.stdout.write('Package: example\\nVersion: 2\\nSource: wrong\\n\\n')
+sys.stdout.write('Package: example\\nVersion: 1\\nSource: correct (1)\\n\\n')
+sys.stdout.write('Package: example\\nVersion: 1\\nSource: duplicate\\nDescription: ' + 'x' * 1000000 + '\\n')
+''')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout, 'correct (1)\n')
+
+    def test_metadata_command_failure_is_preserved(self):
+        result = self.run_field_reader('raise SystemExit(5)\n')
+        self.assertEqual(result.returncode, 5)
 
 
 class LinuxSourceCollectionTests(unittest.TestCase):
