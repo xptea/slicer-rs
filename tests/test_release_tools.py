@@ -2,8 +2,10 @@
 import importlib.util
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -13,6 +15,62 @@ spec = importlib.util.spec_from_file_location(
 )
 sources = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(sources)
+
+prepare_spec = importlib.util.spec_from_file_location(
+    'prepare_ci', Path(__file__).resolve().parents[1] / 'scripts/prepare-ci.py',
+)
+prepare_ci = importlib.util.module_from_spec(prepare_spec)
+prepare_spec.loader.exec_module(prepare_ci)
+
+
+class ParallelPreparationTests(unittest.TestCase):
+    def test_both_processes_start_before_either_finishes(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            child = '''
+from pathlib import Path
+import sys, time
+Path(sys.argv[1]).touch()
+deadline = time.monotonic() + 5
+while not Path(sys.argv[2]).exists():
+    if time.monotonic() > deadline:
+        raise SystemExit(1)
+    time.sleep(0.01)
+'''
+            commands = [
+                [sys.executable, '-c', child, str(root / 'first'), str(root / 'second')],
+                [sys.executable, '-c', child, str(root / 'second'), str(root / 'first')],
+            ]
+            self.assertEqual(prepare_ci.run_parallel(commands), 0)
+
+    def test_one_failure_stops_the_other_process_and_preserves_exit_status(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            pid_file = Path(temporary) / 'sibling.pid'
+            sibling = '''
+from pathlib import Path
+import os, sys, time
+Path(sys.argv[1]).write_text(str(os.getpid()))
+time.sleep(30)
+'''
+            fail = '''
+from pathlib import Path
+import sys, time
+deadline = time.monotonic() + 5
+while not Path(sys.argv[1]).exists():
+    if time.monotonic() > deadline:
+        raise SystemExit(2)
+    time.sleep(0.01)
+raise SystemExit(7)
+'''
+            began = time.monotonic()
+            status = prepare_ci.run_parallel([
+                [sys.executable, '-c', fail, str(pid_file)],
+                [sys.executable, '-c', sibling, str(pid_file)],
+            ])
+            self.assertEqual(status, 7)
+            self.assertLess(time.monotonic() - began, 10)
+            with self.assertRaises(ProcessLookupError):
+                sources.os.kill(int(pid_file.read_text()), 0)
 
 
 class LinuxSourceCollectionTests(unittest.TestCase):

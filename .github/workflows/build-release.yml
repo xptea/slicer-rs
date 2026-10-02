@@ -82,7 +82,10 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: build/playback/${{ matrix.target }}
-          key: playback-v1-${{ matrix.runner }}-${{ matrix.target }}-${{ hashFiles('packaging/mpv-minimal.lock', 'packaging/PLAYBACK-NOTICE.txt', 'scripts/bundle-playback-*', 'scripts/collect-playback-sources.py') }}
+          # Downloader/orchestration edits do not change the prepared runtime.
+          key: playback-v2-${{ matrix.runner }}-${{ matrix.target }}-${{ hashFiles('packaging/mpv-minimal.lock', 'packaging/PLAYBACK-NOTICE.txt', 'scripts/bundle-playback-*') }}
+          # Migrate the verified runtime already built with this exact recipe.
+          restore-keys: playback-v1-${{ matrix.runner }}-${{ matrix.target }}-${{ hashFiles('packaging/mpv-minimal.lock', 'packaging/PLAYBACK-NOTICE.txt', 'scripts/bundle-playback-*', 'scripts/collect-playback-sources.py') }}
       - name: Restore export source downloads
         if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
         uses: actions/cache@v4
@@ -92,7 +95,7 @@ jobs:
           restore-keys: ffmpeg-sources-v1-
       - name: Restore playback source downloads
         id: playback-source-cache
-        if: steps.playback-cache.outputs.cache-hit != 'true'
+        if: steps.playback-cache.outputs.cache-matched-key == ''
         uses: actions/cache/restore@v4
         with:
           path: build/playback-source
@@ -120,7 +123,7 @@ jobs:
           sudo sed -i -e 's/^Types: deb$/Types: deb deb-src/' -e 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources
           sudo apt-get update
           PLAYBACK_PACKAGES=()
-          if [[ "${{ steps.playback-cache.outputs.cache-hit }}" != true ]]; then
+          if [[ -z "${{ steps.playback-cache.outputs.cache-matched-key }}" ]]; then
             PLAYBACK_PACKAGES+=(libmpv2)
           fi
           sudo apt-get install -y "${PLAYBACK_PACKAGES[@]}" build-essential clang cmake pkg-config nasm python3 patchelf dpkg-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libfontconfig1-dev libfreetype6-dev libvulkan-dev libssl-dev libzstd-dev zlib1g-dev libasound2-dev xvfb mesa-vulkan-drivers libegl1-mesa-dev libgl1-mesa-dev
@@ -128,7 +131,7 @@ jobs:
         if: matrix.platform == 'macos'
         shell: bash
         run: |
-          if [[ "${{ steps.playback-cache.outputs.cache-hit }}" != true ]]; then brew install mpv; fi
+          if [[ -z "${{ steps.playback-cache.outputs.cache-matched-key }}" ]]; then brew install mpv; fi
           if [[ "${{ steps.ffmpeg-cache.outputs.cache-hit }}" != true ]]; then brew install pkgconf nasm; fi
       - name: Build pinned export runtime
         if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
@@ -143,20 +146,11 @@ jobs:
         with:
           path: build/ffmpeg/${{ matrix.target }}
           key: ${{ steps.ffmpeg-cache.outputs.cache-primary-key }}
-      - name: Inventory playback runtime and collect corresponding sources
-        if: steps.playback-cache.outputs.cache-hit != 'true'
+      - name: Compile Rust and prepare playback in parallel
         timeout-minutes: 30
-        shell: bash
-        run: |
-          if [[ "$PLATFORM" == macos ]]; then
-            python3 scripts/bundle-playback-macos.py --libmpv "$(brew --prefix mpv)/lib/libmpv.2.dylib" --output build/playback-inventory --allow-missing-sources
-            python3 scripts/collect-playback-sources.py macos build/playback-inventory build/playback-source
-            python3 scripts/bundle-playback-macos.py --libmpv "$(brew --prefix mpv)/lib/libmpv.2.dylib" --output "build/playback/$TARGET" --source-cache build/playback-source --require-source-index
-          else
-            scripts/bundle-playback-linux.sh --output build/playback-inventory --allow-missing-sources
-            python3 scripts/collect-playback-sources.py linux build/playback-inventory build/playback-source
-            scripts/bundle-playback-linux.sh --output "build/playback/$TARGET" --source-cache build/playback-source
-          fi
+        env:
+          SLICER_PLAYBACK_CACHED: ${{ steps.playback-cache.outputs.cache-matched-key != '' }}
+        run: python3 scripts/prepare-ci.py
       - name: Verify restored or built media runtimes
         shell: bash
         run: |

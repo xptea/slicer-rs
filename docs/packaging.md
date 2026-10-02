@@ -469,6 +469,11 @@ discard those builds. The export runtime is saved before playback collection,
 so playback failures also retain the compiled export tools. Separate source
 download caches speed up runtime rebuilds. Tests use `cargo test --release`,
 sharing dependencies with packaging.
+Rust builds the release executable and test executables while playback inventory
+and source collection run in parallel on the same runner. Media tests run after
+both finish; a failed preparation stops the other process group before cache
+saving. The completed playback cache is keyed by the runtime recipe, independent
+of download/orchestration helper edits, with an exact legacy-cache migration.
 The first build is cold; GitHub can evict old caches, so cache reuse is an
 optimization rather than a prerequisite for a successful build.
 Each build has a 60-minute limit; playback inventory and source collection have

@@ -96,6 +96,9 @@ Pushes to `codex/ci-*` branches and manual Actions runs test the same builds and
 packaging using that commit, retaining downloads as workflow artifacts. These
 test runs never publish release assets. Release builds use the published tag.
 Linux source downloads run four at a time and survive failed build attempts.
+Rust compilation overlaps playback preparation on cold builds. The completed
+playback cache follows the runtime recipe, so editing a download helper does
+not force another source download.
 Rust notices are collected before native builds, and each build job is limited
 to 60 minutes. Intel Mac and ARM Linux releases are no longer produced.
 DMGs contain the app and its runtimes; the matching `.tar.gz` also carries the
