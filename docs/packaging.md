@@ -476,6 +476,9 @@ saving. The completed playback cache is keyed by the runtime recipe, independent
 of download/orchestration helper edits, with an exact legacy-cache migration.
 The CI compiler is pinned to Rust 1.99.0. Compiler upgrades are explicit workflow
 changes, preserving compiled dependencies between runs of the same toolchain.
+CI removes the runner's unused floating `stable` toolchain after selecting the
+pin, because rust-cache fingerprints all installed compilers, not just the one
+used for this build.
 The first build is cold; GitHub can evict old caches, so cache reuse is an
 optimization rather than a prerequisite for a successful build.
 Each build has a 60-minute limit; playback inventory and source collection have

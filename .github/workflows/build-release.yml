@@ -65,6 +65,10 @@ jobs:
         with:
           # Upgrade deliberately, rather than discarding caches on a stable update.
           toolchain: '1.99.0'
+      - name: Remove unused floating Rust toolchain
+        # rust-cache fingerprints every installed compiler, including unused ones.
+        # Keep the pinned compiler; do not let the runner's old stable invalidate it.
+        run: rustup toolchain uninstall stable
       - name: Cache Rust dependencies and release artifacts
         uses: Swatinem/rust-cache@v2
         with:
