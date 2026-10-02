@@ -99,6 +99,7 @@ Linux source downloads run four at a time and survive failed build attempts.
 Rust compilation overlaps playback preparation on cold builds. The completed
 playback cache follows the runtime recipe, so editing a download helper does
 not force another source download.
+CI pins Rust 1.99.0 so a new stable compiler does not silently discard its build cache.
 Rust notices are collected before native builds, and each build job is limited
 to 60 minutes. Intel Mac and ARM Linux releases are no longer produced.
 DMGs contain the app and its runtimes; the matching `.tar.gz` also carries the

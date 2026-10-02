@@ -62,6 +62,9 @@ jobs:
           ref: ${{ github.event.client_payload.release_tag || github.sha }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          # Upgrade deliberately, rather than discarding caches on a stable update.
+          toolchain: '1.99.0'
       - name: Cache Rust dependencies and release artifacts
         uses: Swatinem/rust-cache@v2
         with:
