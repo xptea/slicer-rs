@@ -12,7 +12,7 @@ Extract `dist/slicer-linux-x86_64-native.tar.gz`, keep the whole folder together
 ## Run and build on macOS
 
 Open `dist/slicer-macos-aarch64/Slicer.app` on Apple Silicon, or drag it from
-`dist/slicer-macos-aarch64.dmg` to Applications. Intel builds use `macos-x86_64`.
+`dist/slicer-macos-aarch64.dmg` to Applications.
 The app includes its icon, FFmpeg/ffprobe, and the private libmpv dependency closure.
 No Homebrew installation is required on the destination Mac.
 
@@ -81,17 +81,23 @@ Offline checks do not interrupt editing. Settings shows the installed version.
 
 ## Publishing releases
 
-The [release workflow](.github/workflows/release.yml) runs only when a GitHub
-release is published, never on pushes. It dispatches the
+The [release workflow](.github/workflows/release.yml) runs when a GitHub
+release is published. It dispatches the
 [build workflow](.github/workflows/build-release.yml) on `main`, which checks out
-the release tag and builds Linux x86_64/ARM64 and macOS
-Intel/Apple Silicon, tests the bundled runtimes, and uploads DMGs, portable
+the release tag and builds Linux x86_64 and Apple Silicon macOS,
+tests the bundled runtimes, and uploads DMGs, portable
 archives, Debian packages and SHA-256 checksums after every build succeeds.
 macOS builds run on macOS 15; Ubuntu builds run on Ubuntu 24.04 (X11/XWayland).
 The exact minimum macOS requirement is recorded from the bundled binaries.
 Rust dependencies, compiled FFmpeg/playback runtimes, and source downloads are
 cached across releases. Tests and packaging share the Rust release profile.
 The first build fills these caches; later builds reuse unchanged dependencies.
+Pushes to `codex/ci-*` branches and manual Actions runs test the same builds and
+packaging using that commit, retaining downloads as workflow artifacts. These
+test runs never publish release assets. Release builds use the published tag.
+Linux source downloads run four at a time and survive failed build attempts.
+Rust notices are collected before native builds, and each build job is limited
+to 60 minutes. Intel Mac and ARM Linux releases are no longer produced.
 DMGs contain the app and its runtimes; the matching `.tar.gz` also carries the
 corresponding media sources outside the app bundle.
 

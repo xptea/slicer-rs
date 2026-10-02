@@ -7,7 +7,9 @@ import sys
 
 output = pathlib.Path(sys.argv[1] if len(sys.argv) > 1 else 'build/rust-notices')
 output.mkdir(parents=True, exist_ok=True)
-metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--locked', '--offline', '--format-version', '1']))
+# Metadata includes dependencies for other platforms that a native build does
+# not download. Allow Cargo to fetch those exact locked crates for their notices.
+metadata = json.loads(subprocess.check_output(['cargo', 'metadata', '--locked', '--format-version', '1']))
 lines = ['# Rust dependency notices', '', 'Generated from Cargo.lock. Each package retains its own license.', '']
 for package in sorted(metadata['packages'], key=lambda item: (item['name'], item['version'])):
     if package['source'] is None:

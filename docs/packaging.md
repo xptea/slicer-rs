@@ -375,7 +375,7 @@ are the complete corresponding sources for their binaries.
 
 `build-macos.sh` backs up previous generated outputs under `dist/previous/` before
 replacing them, so `dist/slicer-macos-aarch64/Slicer.app` and the matching DMG always
-contain the latest completed build. Intel builds use `macos-x86_64`. The lower-level
+contain the latest completed build. The lower-level
 `package-macos.sh` accepts `--binary`, `--ffmpeg-bundle`, `--playback-bundle`, and
 `--dmg`; it rejects wrong-architecture or incomplete runtime layouts.
 
@@ -448,9 +448,12 @@ continues to use each platform’s native libmpv surface.
 `.github/workflows/build-release.yml` using `repository_dispatch` on `main`.
 The worker checks out the published release tag. Running the workflow on the
 default branch allows successive release tags to share GitHub caches, which
-otherwise cannot be restored across sibling tags. There is no push or
-pull-request trigger. Stable `vMAJOR.MINOR.PATCH` releases build natively
-on Ubuntu 24.04 x86_64/ARM64 and macOS 15 Intel/Apple Silicon. Version validation,
+otherwise cannot be restored across sibling tags. Pushes to `codex/ci-*`
+branches and manual Actions runs build their selected commit through the same
+test/package pipeline. Test runs upload workflow artifacts and skip release
+publishing. Stable `vMAJOR.MINOR.PATCH` releases build natively
+on Ubuntu 24.04 x86_64 and macOS 15 Apple Silicon. Intel Mac and ARM Linux
+are excluded from the release matrix. Version validation,
 all application/media tests, source collection, runtime relocation, package
 smoke checks and macOS signature/DMG checks must pass before the publish job
 uploads any assets. Rerunning a failed release workflow replaces that release's
@@ -462,14 +465,24 @@ invalidation. Media caches retain the complete compiled FFmpeg and playback
 closures, including corresponding sources, keyed by platform and build recipe.
 Restored runtime binaries and source hashes are verified before reuse. Native
 runtime caches are saved before application tests, so a later failure does not
-discard those builds. Separate source download caches also speed up runtime
-rebuilds. Tests use `cargo test --release`, sharing dependencies with packaging.
+discard those builds. The export runtime is saved before playback collection,
+so playback failures also retain the compiled export tools. Separate source
+download caches speed up runtime rebuilds. Tests use `cargo test --release`,
+sharing dependencies with packaging.
 The first build is cold; GitHub can evict old caches, so cache reuse is an
 optimization rather than a prerequisite for a successful build.
+Each build has a 60-minute limit; playback inventory and source collection have
+a 30-minute limit. Rust notices are collected before native builds, with locked
+Cargo metadata allowed to fetch platform-specific crates absent from a native
+build's cache.
 
 The Linux job enables distro source repositories and downloads the exact
 `.dsc`/upstream/distro archives named by the copied ELF dependency inventory.
 The strict Linux bundler checks their versions, sizes and SHA-256 hashes.
+Source downloads use the official Ubuntu archive, run four at a time with
+bounded retries/timeouts, and keep separate per-package download directories.
+Completed archives are exposed at the cache root for the strict bundler;
+partial downloads are retained in the source cache even if a later step fails.
 The macOS job reads the saved installed Homebrew formulas, source recipes,
 resources and patch SBOMs. It downloads checksum-verified archives and exact
 Git revisions, including submodules, and verifies the complete collected source
@@ -490,9 +503,7 @@ Release filenames are stable, with the version in the GitHub release tag:
 | Platform | Downloads |
 | --- | --- |
 | Apple Silicon | `slicer-macos-aarch64.dmg`, `.tar.gz` |
-| Intel Mac | `slicer-macos-x86_64.dmg`, `.tar.gz` |
 | Linux x86_64 | `slicer-linux-x86_64.tar.gz`, `.deb` |
-| Linux ARM64 | `slicer-linux-aarch64.tar.gz`, `.deb` |
 
 Each release also receives `version.json` and `SHA256SUMS.txt`. Update
 `Cargo.toml`, `Cargo.lock` and the root `version.json` together on `main`, then

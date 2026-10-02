@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Collect exact corresponding sources for an inventoried native playback closure."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import hashlib
 import json
 import os
@@ -123,7 +124,28 @@ def macos(bundle, cache):
         (directory / 'SHA256SUMS').write_text(''.join(f'{sha(p)}  {p.name}\n' for p in sorted(directory.iterdir()) if p.is_file() and p.name != 'SHA256SUMS'))
 
 
-def linux(bundle, cache):
+def download_linux_source(package, version, cache):
+    print('Collecting sources:', package, version, flush=True)
+    # Isolate each apt process: source packages may share upstream filenames.
+    # Keep partial downloads in the cache so a failed run can resume them.
+    directory = cache / (package + '-' + version.replace(':', '_'))
+    directory.mkdir(parents=True, exist_ok=True)
+    try:
+        result = subprocess.run(
+            ['apt-get', '-o', 'Acquire::Retries=3', '-o', 'Acquire::http::Timeout=30',
+             '-o', 'Acquire::https::Timeout=30', 'source', '--download-only',
+             '--only-source', package + '=' + version],
+            cwd=directory, check=True, stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, timeout=900,
+        )
+    except subprocess.CalledProcessError as error:
+        print(error.stdout, flush=True)
+        raise
+    print(result.stdout, flush=True)
+    return directory
+
+
+def linux(bundle, cache, jobs=4):
     cache.mkdir(parents=True, exist_ok=True)
     sources = set()
     for line in (bundle / 'SOURCE-MANIFEST.txt').read_text().splitlines():
@@ -134,9 +156,28 @@ def linux(bundle, cache):
             sources.add((fields[3], fields[4]))
     if not sources:
         raise RuntimeError('no distro source packages in playback inventory')
-    for package, version in sorted(sources):
-        print('Collecting sources:', package, version, flush=True)
-        subprocess.run(['apt-get', 'source', '--download-only', '--only-source', package + '=' + version], cwd=cache, check=True)
+    # Overlap large archives instead of downloading the entire closure in sequence.
+    with ThreadPoolExecutor(max_workers=jobs) as executor:
+        downloads = [executor.submit(download_linux_source, package, version, cache)
+                     for package, version in sorted(sources)]
+        try:
+            for download in as_completed(downloads):
+                for path in download.result().iterdir():
+                    if not path.is_file():
+                        continue
+                    target = cache / path.name
+                    if target.exists() and sha(target) == sha(path):
+                        continue
+                    # Keep hardlinks in the per-package directory for apt's resume
+                    # checks. Do not overwrite an inode apt may still be reading.
+                    partial = cache / (path.name + '.partial')
+                    partial.unlink(missing_ok=True)
+                    os.link(path, partial)
+                    partial.replace(target)
+        except BaseException:
+            for download in downloads:
+                download.cancel()
+            raise
     # The strict bundler verifies .dsc versions and every archive size/hash next.
 
 
@@ -145,8 +186,14 @@ def main():
     parser.add_argument('platform', choices=['macos', 'linux'])
     parser.add_argument('bundle', type=Path)
     parser.add_argument('cache', type=Path)
+    parser.add_argument('--jobs', type=int, default=4, help='parallel Linux source downloads (default: 4)')
     args = parser.parse_args()
-    globals()[args.platform](args.bundle.resolve(), args.cache.resolve())
+    if args.jobs < 1:
+        parser.error('--jobs must be positive')
+    if args.platform == 'linux':
+        linux(args.bundle.resolve(), args.cache.resolve(), args.jobs)
+    else:
+        macos(args.bundle.resolve(), args.cache.resolve())
 
 
 if __name__ == '__main__':

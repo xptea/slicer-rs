@@ -1,8 +1,12 @@
-name: Build release downloads
-run-name: Release ${{ github.event.client_payload.release_tag }} (${{ github.event.client_payload.request_id }})
+name: Build and test downloads
+run-name: ${{ github.event.client_payload.release_tag || github.ref_name }} (${{ github.run_number }}.${{ github.run_attempt }})
 
 # repository_dispatch runs on main, so caches are reusable by later releases.
 on:
+  # Test the complete release build on a branch before publishing a release.
+  push:
+    branches: ['codex/ci-*']
+  workflow_dispatch:
   repository_dispatch:
     types: [slicer-release-build]
 
@@ -10,18 +14,20 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-build-${{ github.event.client_payload.release_tag }}
-  cancel-in-progress: false
+  group: release-build-${{ github.event.client_payload.release_tag || github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'repository_dispatch' }}
 
 jobs:
   validate:
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     env:
       GH_TOKEN: ${{ github.token }}
       GH_REPO: ${{ github.repository }}
       RELEASE_TAG: ${{ github.event.client_payload.release_tag }}
     steps:
       - name: Require an existing published stable release
+        if: github.event_name == 'repository_dispatch'
         run: |
           python3 -c 'import os,re; assert re.fullmatch(r"v[0-9]+\.[0-9]+\.[0-9]+", os.environ["RELEASE_TAG"]), "invalid stable release tag"'
           gh api "repos/$GH_REPO/releases/tags/$RELEASE_TAG" > release.json
@@ -31,7 +37,7 @@ jobs:
     needs: validate
     name: Build ${{ matrix.target }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 120
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -39,15 +45,9 @@ jobs:
           - runner: ubuntu-24.04
             platform: linux
             target: linux-x86_64
-          - runner: ubuntu-24.04-arm
-            platform: linux
-            target: linux-aarch64
           - runner: macos-15
             platform: macos
             target: macos-aarch64
-          - runner: macos-15-intel
-            platform: macos
-            target: macos-x86_64
     env:
       RELEASE_TAG: ${{ github.event.client_payload.release_tag }}
       TARGET: ${{ matrix.target }}
@@ -59,7 +59,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.client_payload.release_tag }}
+          ref: ${{ github.event.client_payload.release_tag || github.sha }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
       - name: Cache Rust dependencies and release artifacts
@@ -91,18 +91,33 @@ jobs:
           key: ffmpeg-sources-v1-${{ hashFiles('packaging/ffmpeg.lock') }}
           restore-keys: ffmpeg-sources-v1-
       - name: Restore playback source downloads
+        id: playback-source-cache
         if: steps.playback-cache.outputs.cache-hit != 'true'
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: build/playback-source
-          key: playback-sources-v1-${{ matrix.runner }}-${{ matrix.target }}-${{ hashFiles('packaging/mpv-minimal.lock', 'scripts/collect-playback-sources.py') }}
-          restore-keys: playback-sources-v1-${{ matrix.runner }}-${{ matrix.target }}-
+          # A new key per attempt lets retries retain newly completed downloads.
+          key: playback-sources-v2-${{ matrix.runner }}-${{ matrix.target }}-${{ hashFiles('packaging/mpv-minimal.lock', 'scripts/collect-playback-sources.py') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            playback-sources-v2-${{ matrix.runner }}-${{ matrix.target }}-${{ hashFiles('packaging/mpv-minimal.lock', 'scripts/collect-playback-sources.py') }}-
+            playback-sources-v2-${{ matrix.runner }}-${{ matrix.target }}-
+            playback-sources-v1-${{ matrix.runner }}-${{ matrix.target }}-
       - name: Validate release version
-        run: python3 scripts/check-release-version.py --tag "$RELEASE_TAG"
+        run: |
+          if [[ -z "$RELEASE_TAG" ]]; then
+            RELEASE_TAG="v$(python3 -c 'import json; print(json.load(open("version.json"))["version"])')"
+          fi
+          python3 scripts/check-release-version.py --tag "$RELEASE_TAG"
+      - name: Test release source collector
+        run: python3 -m unittest discover -s tests -p 'test_release_tools.py'
+      # Catch notice/download failures before building native media runtimes.
+      - name: Collect locked Rust dependency notices
+        timeout-minutes: 10
+        run: python3 tools/collect-rust-notices.py build/rust-notices
       - name: Install Linux build dependencies
         if: matrix.platform == 'linux'
         run: |
-          sudo sed -i 's/^Types: deb$/Types: deb deb-src/' /etc/apt/sources.list.d/ubuntu.sources
+          sudo sed -i -e 's/^Types: deb$/Types: deb deb-src/' -e 's|http://azure.archive.ubuntu.com/ubuntu|https://archive.ubuntu.com/ubuntu|g' /etc/apt/sources.list.d/ubuntu.sources
           sudo apt-get update
           PLAYBACK_PACKAGES=()
           if [[ "${{ steps.playback-cache.outputs.cache-hit }}" != true ]]; then
@@ -117,9 +132,20 @@ jobs:
           if [[ "${{ steps.ffmpeg-cache.outputs.cache-hit }}" != true ]]; then brew install pkgconf nasm; fi
       - name: Build pinned export runtime
         if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 10
         run: scripts/build-ffmpeg.sh --target "$TARGET" --output "build/ffmpeg/$TARGET"
+      - name: Verify export runtime
+        run: scripts/verify-export-bundle.sh "build/ffmpeg/$TARGET"
+      # Retain the export build even if playback source collection fails.
+      - name: Save compiled export runtime
+        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: build/ffmpeg/${{ matrix.target }}
+          key: ${{ steps.ffmpeg-cache.outputs.cache-primary-key }}
       - name: Inventory playback runtime and collect corresponding sources
         if: steps.playback-cache.outputs.cache-hit != 'true'
+        timeout-minutes: 30
         shell: bash
         run: |
           if [[ "$PLATFORM" == macos ]]; then
@@ -142,12 +168,6 @@ jobs:
           fi
           python3 scripts/verify-playback-sources.py "$PLATFORM" "build/playback/$TARGET"
       # Save expensive native builds now, even if a later app test fails.
-      - name: Save compiled export runtime
-        if: steps.ffmpeg-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@v4
-        with:
-          path: build/ffmpeg/${{ matrix.target }}
-          key: ${{ steps.ffmpeg-cache.outputs.cache-primary-key }}
       - name: Save complete playback runtime
         if: steps.playback-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
@@ -199,11 +219,20 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 0
+      - name: Retain playback source downloads after failures
+        if: ${{ !cancelled() && steps.playback-source-cache.outputs.cache-primary-key != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: build/playback-source
+          key: ${{ steps.playback-source-cache.outputs.cache-primary-key }}
 
   publish:
     name: Publish all verified release assets
+    # Branch/manual tests keep downloadable artifacts but never change releases.
+    if: github.event_name == 'repository_dispatch'
     needs: build
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: write
     env:
@@ -223,7 +252,7 @@ jobs:
       - name: Check complete matrix and publish
         shell: bash
         run: |
-          for target in linux-x86_64 linux-aarch64 macos-x86_64 macos-aarch64; do
+          for target in linux-x86_64 macos-aarch64; do
             test -s "release-assets/slicer-$target.tar.gz"
             if [[ "$target" == macos-* ]]; then
               test -s "release-assets/slicer-$target.dmg"
