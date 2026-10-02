@@ -448,10 +448,12 @@ continues to use each platform’s native libmpv surface.
 `.github/workflows/build-release.yml` using `repository_dispatch` on `main`.
 The worker checks out the published release tag. Running the workflow on the
 default branch allows successive release tags to share GitHub caches, which
-otherwise cannot be restored across sibling tags. Pushes to `codex/ci-*`
-branches and manual Actions runs build their selected commit through the same
-test/package pipeline. Test runs upload workflow artifacts and skip release
-publishing. Stable `vMAJOR.MINOR.PATCH` releases build natively
+otherwise cannot be restored across sibling tags. Pushes do not trigger builds.
+Manual runs of **Build release downloads** use the same test/package pipeline.
+With `release_tag` empty, they build the selected commit, upload workflow
+artifacts, and skip release publishing. With an existing published stable tag,
+they build that tag and upload its release assets after validation. Stable
+`vMAJOR.MINOR.PATCH` releases build natively
 on Ubuntu 24.04 x86_64 and macOS 15 Apple Silicon. Intel Mac and ARM Linux
 are excluded from the release matrix. Version validation,
 all application/media tests, source collection, runtime relocation, package

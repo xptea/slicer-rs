@@ -92,9 +92,11 @@ The exact minimum macOS requirement is recorded from the bundled binaries.
 Rust dependencies, compiled FFmpeg/playback runtimes, and source downloads are
 cached across releases. Tests and packaging share the Rust release profile.
 The first build fills these caches; later builds reuse unchanged dependencies.
-Pushes to `codex/ci-*` branches and manual Actions runs test the same builds and
-packaging using that commit, retaining downloads as workflow artifacts. These
-test runs never publish release assets. Release builds use the published tag.
+Pushes do not start release builds. Publish a stable GitHub release, or select
+**Actions → Build release downloads → Run workflow**. For a manual run, leave
+`release_tag` empty to build the selected commit and retain workflow artifacts;
+enter an existing published stable tag to build it and upload its release assets.
+Release builds use the published tag.
 Linux source downloads run four at a time and survive failed build attempts.
 Rust compilation overlaps playback preparation on cold builds. The completed
 playback cache follows the runtime recipe, so editing a download helper does
